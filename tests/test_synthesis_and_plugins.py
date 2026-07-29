@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import invariants
 import synthweave as sw
 
 
@@ -290,3 +291,88 @@ def test_run_to_keeps_provenance_without_materializing_tables(schema, tmp_path):
     result = sw.Pipeline(schema).run_to(tmp_path, format="csv")
     assert result.tables == {}
     assert len(result.provenance) > 0
+
+
+# --- multi-column synthesis -------------------------------------------------
+#
+# Every test above synthesizes exactly one column. These drive the sequential
+# visit order: column n is fitted on the predictors plus columns 0..n-1, each
+# encoded on its own, each with its own donor pools.
+
+
+def _multi(**overrides):
+    """The synthesizer under test in this section."""
+    kwargs = dict(
+        columns=["sector", "wage", "hours", "tenure"],
+        tables=["jobs"],
+        predictors=["education"],
+        structure=sw.Declared(),
+    )
+    kwargs.update(overrides)
+    return sw.CARTSynthesizer(**kwargs)
+
+
+def test_a_chain_of_declared_relationships_survives_multi_column_synthesis(careers):
+    """Both links of the chain, not just the first.
+
+    education decides sector, and sector decides wage. A synthesizer that
+    conditioned every column on the predictors alone would keep the first link
+    and lose the second, which is the failure this catches.
+    """
+    out = sw.Pipeline(careers, synthesizer=_multi()).run()["jobs"]
+
+    college = out.loc[out["education"] == "College", "sector"]
+    assert (college.isin(["tech", "health"])).mean() > 0.9
+
+    means = out.groupby("sector")["wage"].mean()
+    assert means["tech"] > means["trades"] > means["retail"]
+
+
+def test_multi_column_synthesis_is_chunk_invariant(careers):
+    invariants.assert_chunk_invariant(careers, synthesizer=_multi())
+
+
+def test_multi_column_synthesis_is_deterministic(careers):
+    invariants.assert_deterministic(careers, synthesizer=_multi())
+
+
+def test_every_synthesized_value_comes_from_a_donor_row(careers):
+    """CART samples donors. It never interpolates a new value."""
+    raw = sw.Pipeline(careers).run()["jobs"]
+    out = sw.Pipeline(careers, synthesizer=_multi()).run()["jobs"]
+
+    for column in ("sector", "wage", "hours"):
+        invariants.assert_values_come_from(out, column, raw[column])
+
+
+def test_a_synthesized_column_keeps_the_dtype_it_had(careers):
+    """Choosing to synthesize must not change a column's type.
+
+    Donor values are sampled through an object array, which is an
+    implementation detail of the sampling and not something the user asked
+    for. The column's type is fixed by the fit, so it is known and can be
+    restored. Downstream code that sums or compares a column should not have
+    to care whether a synthesizer ran.
+    """
+    raw = sw.Pipeline(careers).run()["jobs"]
+    out = sw.Pipeline(careers, synthesizer=_multi()).run()["jobs"]
+
+    for column in ("wage", "hours", "tenure"):
+        assert out[column].dtype == raw[column].dtype, (
+            f"{column} was {raw[column].dtype} before synthesis and "
+            f"{out[column].dtype} after"
+        )
+
+
+def test_synthesis_does_not_hide_a_numeric_column_behind_object_dtype(careers):
+    """The consequence that makes the dtype worth keeping.
+
+    An object column is invisible to numeric selection, costs eight bytes a
+    value, and gives Parquet nothing to infer from. tenure is int64 when the
+    generator produces it and must still be numeric after synthesis.
+    """
+    out = sw.Pipeline(careers, synthesizer=_multi()).run()["jobs"]
+
+    assert "tenure" in out.select_dtypes("number").columns, (
+        f"tenure came back as {out['tenure'].dtype}, so no numeric operation sees it"
+    )

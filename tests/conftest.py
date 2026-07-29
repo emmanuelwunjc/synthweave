@@ -76,3 +76,54 @@ def wages() -> sw.Table:
 @pytest.fixture
 def schema(people, roster, wages) -> sw.Schema:
     return sw.Schema(entities=[people], tables=[roster, wages], seed=42)
+
+
+@pytest.fixture
+def jobs() -> sw.Table:
+    """Three columns whose declared structure is chained.
+
+    sector depends on the carried education, and wage and hours both depend on
+    sector. A single synthesized column proves nothing about visit order or
+    about conditioning on already-synthesized columns. A chain does.
+    """
+    return sw.Table(
+        "jobs",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={
+            "sector": sw.Conditional(
+                "education",
+                {
+                    "HS": sw.Choice(["retail", "trades"], [0.7, 0.3]),
+                    "College": sw.Choice(["tech", "health"], [0.5, 0.5]),
+                },
+            ),
+            "wage": sw.Conditional(
+                "sector",
+                {
+                    "retail": sw.Normal(30_000, 4_000, low=0),
+                    "trades": sw.Normal(48_000, 5_000, low=0),
+                    "tech": sw.Normal(95_000, 9_000, low=0),
+                    "health": sw.Normal(72_000, 7_000, low=0),
+                },
+            ),
+            "hours": sw.Conditional(
+                "sector",
+                {
+                    "retail": sw.Integer(10, 30),
+                    "trades": sw.Integer(35, 50),
+                    "tech": sw.Integer(35, 45),
+                    "health": sw.Integer(30, 60),
+                },
+            ),
+            # Unconditional on purpose: it is the one column the generator
+            # hands over as a real int64, so it is the only one that can show
+            # whether a later stage preserves a dtype.
+            "tenure": sw.Integer(0, 40),
+        },
+    )
+
+
+@pytest.fixture
+def careers(people, jobs) -> sw.Schema:
+    return sw.Schema(entities=[people], tables=[jobs], seed=11)

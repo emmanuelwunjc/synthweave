@@ -243,9 +243,19 @@ class _FittedCART:
         self.codes: dict[str, dict[Any, int]] = {}
         self.trees: dict[str, Any] = {}
         self.donors: dict[str, dict[int, np.ndarray]] = {}
+        self.dtypes: dict[str, Any] = {}
         self.marginal: np.ndarray | None = None
 
     def fit(self, train: pd.DataFrame) -> "_FittedCART":
+        # Donor sampling runs through object arrays, because a leaf's pool is
+        # sliced by a boolean mask and pandas has no dtype-preserving way to
+        # do that per leaf. The column's type is a property of the fit, not of
+        # a chunk, so recording it here is what lets `apply` put it back
+        # without asking the chunk. Reading the dtype off the chunk instead
+        # would make it chunk dependent, which is exactly what invariant 2
+        # forbids.
+        self.dtypes = {column: train[column].dtype for column in self.columns}
+
         for column in self.columns + self.predictors:
             if not _is_numeric(train[column]):
                 cats = pd.unique(train[column].dropna())
@@ -297,7 +307,7 @@ class _FittedCART:
             idx = _hash.integers(
                 keys, seed, f"synth\x00{table_name}\x00{first}", 0, len(self.marginal)
             )
-            out[first] = self.marginal[idx]
+            out[first] = self._restore(first, self.marginal[idx])
 
         for target in self.columns:
             if target not in self.trees:
@@ -314,8 +324,20 @@ class _FittedCART:
                     continue
                 take = np.minimum((pos[mask] * len(pool)).astype(int), len(pool) - 1)
                 values[mask] = pool[take]
-            out[target] = values
+            out[target] = self._restore(target, values)
         return out
+
+    def _restore(self, column: str, values: np.ndarray) -> np.ndarray:
+        """Give sampled donor values back the dtype the fit saw.
+
+        The dtype comes from the model, never from the chunk, so every chunk
+        lands on the same type. An int64 column cannot hold nulls in the first
+        place, so a cast back to it cannot be asked to represent one.
+        """
+        dtype = self.dtypes.get(column)
+        if dtype is None or dtype == object:
+            return values
+        return values.astype(dtype)
 
     def _encode(self, frame: pd.DataFrame, features: Sequence[str]) -> np.ndarray:
         cols = [self._encode_column(f, frame[f]) for f in features]
