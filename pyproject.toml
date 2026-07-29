@@ -20,6 +20,11 @@ classifiers = [
 ]
 dependencies = ["pandas>=2.0", "numpy>=1.24", "scikit-learn>=1.3"]
 
+[project.urls]
+Homepage = "https://github.com/emmanuelwunjc/synthweave"
+Source = "https://github.com/emmanuelwunjc/synthweave"
+Issues = "https://github.com/emmanuelwunjc/synthweave/issues"
+
 [project.optional-dependencies]
 parquet = ["pyarrow>=12"]
 dev = ["pytest>=7", "pyarrow>=12"]
