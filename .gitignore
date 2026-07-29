@@ -22,6 +22,11 @@ htmlcov/
 output/
 out/
 
+# Internal working notes. The brainstorm transcripts name internal projects,
+# local paths, and collaborators, so they stay out of the public repo. The
+# decisions that matter are restated in docs/specs/.
+docs/brainstorms/
+
 # Editors and OS
 .DS_Store
 .idea/
