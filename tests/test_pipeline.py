@@ -611,3 +611,36 @@ def test_sequential_derives_a_column_from_another(people):
 
     assert (result["birth_year"] + result["age"] == 2026).all()
     invariants.assert_chunk_invariant(schema)
+
+
+# --- grain edge cases -------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I16: a repeated period is accepted, so the panel comes out with "
+    "duplicate (entity, period) keys and every join on them fans out",
+)
+def test_a_repeated_period_is_rejected(people):
+    table = sw.Table(
+        "panel", grain=sw.PerPeriod("person", periods=[2020, 2020, 2021]), identifiers=["tax_id"]
+    )
+    with pytest.raises(sw.SchemaError, match="period"):
+        sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1)).run()
+
+
+def test_period_order_does_not_change_the_panel(people):
+    """Unsorted periods are a config nicety, not a data change.
+
+    Rows come out in the order the periods were declared, so the comparison
+    sorts first. Emission order is presentation; what invariant 3 protects is
+    the value attached to each (entity, period) pair.
+    """
+    def run(periods):
+        table = sw.Table(
+            "panel", grain=sw.PerPeriod("person", periods=periods), identifiers=["tax_id"]
+        )
+        frame = sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1)).run()["panel"]
+        return frame.sort_values(["tax_id", "period"]).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(run([2022, 2020, 2021]), run([2020, 2021, 2022]))

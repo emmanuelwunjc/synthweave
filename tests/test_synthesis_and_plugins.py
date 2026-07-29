@@ -538,3 +538,40 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
 
     rates = result.groupby("education")["employed"].mean()
     assert rates["College"] > rates["HS"] + 0.2
+
+
+# --- the numeric heuristic --------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I17: _is_numeric calls a column numeric at 90% numeric, then hands "
+    "the raw values to a regressor, so the sentinel values crash sklearn",
+)
+def test_a_numeric_column_with_a_few_sentinel_values_still_fits(people):
+    """Survey data: an amount column with a handful of 'refused' answers.
+
+    Under the 10% threshold the column is declared numeric and the strings go
+    straight to a regressor. Over it, the same column is treated as
+    categorical and works. More contamination should not be the thing that
+    makes a fit succeed.
+    """
+    rows = 2_000
+    refused = 100  # 5%, comfortably under the 0.9 numeric threshold
+    real = pd.DataFrame(
+        {
+            "education": ["HS", "College"] * (rows // 2),
+            "amount": [str(v) for v in np.linspace(10, 100, rows - refused)] + ["refused"] * refused,
+        }
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"amount": sw.Constant(0)}
+    )
+    result = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=1),
+        synthesizer=sw.CARTSynthesizer(
+            ["amount"], tables=["t"], predictors=["education"], structure=sw.Empirical(real)
+        ),
+    ).run()["t"]
+
+    assert len(result) == 400
