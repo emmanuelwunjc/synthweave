@@ -204,8 +204,9 @@ adding implementations should not require restructuring.
 
 Not yet included: R interop, deep generative synthesizers, disclosure-risk
 metrics, differential privacy. See
-[`docs/specs/synthweave-v0.1.md`](docs/specs/synthweave-v0.1.md) for full scope
-and [`docs/ISSUES.md`](docs/ISSUES.md) for known issues.
+[`docs/specs/synthweave-v0.1.md`](docs/specs/synthweave-v0.1.md) for full scope,
+[`docs/ISSUES.md`](docs/ISSUES.md) for known issues, and
+[`docs/HANDOFF.md`](docs/HANDOFF.md) for the current session handoff.
 
 ## Development
 
