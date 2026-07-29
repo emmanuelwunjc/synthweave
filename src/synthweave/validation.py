@@ -12,6 +12,11 @@ from .rules import resolve_order
 from .schema import PerEvent, PerPeriod, Schema
 
 RESERVED_PREFIX = "_sw_"
+# Below one expected collision, every entity is expected to keep its own
+# identifier. At one or above, the run is expected to hand back at least one
+# identifier that means two different entities, which the linker exists to
+# prevent.
+TOLERABLE_COLLISIONS = 1
 ENTITY_KEY = "_sw_entity"
 ROW_KEY = "_sw_row"
 
@@ -76,6 +81,20 @@ def _validate_table(schema: Schema, table) -> None:
                 f"{where} asks for identifier {tag!r}, which entity {entity.name!r} "
                 f"does not define; it has {sorted(known_tags)}"
             )
+        # The linker assigns identifiers last, so without this check a tag
+        # sharing a name with a column would overwrite it and the run would
+        # report success while the modelled values were gone.
+        if tag in table.columns:
+            raise SchemaError(
+                f"{where}: identifier {tag!r} has the same name as a table column, "
+                f"and the identifier would overwrite it"
+            )
+        if tag in table.carry:
+            raise SchemaError(
+                f"{where}: identifier {tag!r} has the same name as the carried entity "
+                f"attribute {tag!r}, and the identifier would overwrite it"
+            )
+        _check_identifier_width(entity, entity.identifier(tag), where)
 
     grain = table.grain
     if isinstance(grain, PerPeriod):
@@ -90,6 +109,41 @@ def _validate_table(schema: Schema, table) -> None:
                 f"{where}: {grain.occurrence_column!r} is produced by the grain and "
                 f"cannot also be a column"
             )
+
+
+def _expected_collisions(digits: int, population: int) -> float:
+    """Roughly how many entities will share an identifier with another.
+
+    The birthday bound, not the keyspace size. Nine digits looks roomy for
+    400,000 people until the bound puts about 80 collisions in it, which is
+    what the measurement in I14 found.
+    """
+    return population * population / (2 * 10**digits)
+
+
+def _check_identifier_width(entity, identifier, where: str) -> None:
+    """Refuse a keyspace too small to number the population it has to number.
+
+    Judged on the birthday bound rather than the raw keyspace, because that is
+    what the measurement showed: 9 digits over 400,000 entities looks roomy and
+    still produces around 80 identifiers that refer to two different people. A
+    duplicate identifier means two entities are indistinguishable in the
+    output, which breaks the one guarantee the linker exists to make, so this
+    is an error rather than a warning.
+    """
+    population = entity.count.value
+    expected = _expected_collisions(identifier.digits, population)
+    if expected < TOLERABLE_COLLISIONS:
+        return
+    # Invert the bound: the narrowest keyspace whose expectation stays under
+    # one collision is population**2 / 2, so that many digits plus one.
+    needed = len(str(population * population // 2)) + 1
+    raise SchemaError(
+        f"{where}: identifier {identifier.tag!r} uses {identifier.digits} digits, which "
+        f"is too narrow for {population:,} {entity.name!r} entities. Around "
+        f"{expected:.0f} of them would share an identifier with someone else. "
+        f"Use digits={needed} or more."
+    )
 
 
 def _check_unique(names: list[str], kind: str) -> None:

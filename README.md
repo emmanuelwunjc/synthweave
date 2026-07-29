@@ -184,6 +184,20 @@ sw.Pipeline(schema, noiser="scanner-artifacts").run()
 
 `sw.available("noiser")` lists what is registered.
 
+A rule may also declare the type its column holds:
+
+```python
+class Age(sw.Rule):
+    def draw(self, keys, *, seed, salt, frame=None): ...
+    def depends_on(self): return ()
+    def dtype(self): return np.dtype(np.int64)   # optional
+```
+
+Declared rather than inferred, because inference is chunk dependent: a chunk of
+whole numbers looks like an integer column and the next one looks like a float,
+which would make a column's type depend on `chunk_size`. Omit `dtype` and the
+column is left exactly as drawn.
+
 ## Where this came from
 
 The design generalizes two patterns proven in a real engagement building linked
@@ -212,7 +226,7 @@ metrics, differential privacy. See
 
 ```bash
 pip install -e ".[dev]"
-PYTHONPATH=src python -m pytest tests/ -q     # 61 tests, a few seconds
+PYTHONPATH=src python -m pytest tests/ -q
 python tools/mutation_check.py                # see below
 ```
 

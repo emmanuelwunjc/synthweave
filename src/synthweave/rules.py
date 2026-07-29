@@ -48,12 +48,25 @@ class Rule(Protocol):
         """Columns that must be drawn before this one."""
         ...
 
+    # A rule may also define `dtype() -> np.dtype | None`, naming the type its
+    # column holds. Declared rather than inferred, because inference is chunk
+    # dependent: a chunk of whole numbers looks like an integer column and the
+    # next one looks like a float, so the type would follow `chunk_size`.
+    #
+    # It is deliberately not a member of this Protocol. `Rule` is
+    # runtime_checkable, and adding it here would make `isinstance` reject
+    # every rule written before it existed, which is the opposite of optional.
+    # Read it with `declared_dtype`, which treats absence as "no declaration".
+
 
 class _BaseRule:
-    """Default: depends on nothing."""
+    """Default: depends on nothing, declares no type."""
 
     def depends_on(self) -> tuple[str, ...]:
         return ()
+
+    def dtype(self) -> np.dtype | None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -62,6 +75,9 @@ class Constant(_BaseRule):
 
     def draw(self, keys, *, seed, salt, frame=None):
         return np.full(len(keys), self.value, dtype=object)
+
+    def dtype(self):
+        return _scalar_dtype(self.value)
 
 
 @dataclass(frozen=True)
@@ -83,6 +99,9 @@ class Choice(_BaseRule):
         w = np.asarray(self.weights, dtype=float) if self.weights is not None else None
         return _hash.pick(keys, seed, salt, np.asarray(self.values, dtype=object), w)
 
+    def dtype(self):
+        return _widest_dtype([_scalar_dtype(v) for v in self.values])
+
 
 @dataclass(frozen=True)
 class Integer(_BaseRule):
@@ -94,6 +113,9 @@ class Integer(_BaseRule):
     def draw(self, keys, *, seed, salt, frame=None):
         return _hash.integers(keys, seed, salt, self.low, self.high)
 
+    def dtype(self):
+        return np.dtype(np.int64)
+
 
 @dataclass(frozen=True)
 class Uniform(_BaseRule):
@@ -102,6 +124,9 @@ class Uniform(_BaseRule):
 
     def draw(self, keys, *, seed, salt, frame=None):
         return self.low + _hash.unit(keys, seed, salt) * (self.high - self.low)
+
+    def dtype(self):
+        return np.dtype(np.float64)
 
 
 @dataclass(frozen=True)
@@ -116,6 +141,9 @@ class Normal(_BaseRule):
         if self.low is not None or self.high is not None:
             out = np.clip(out, self.low, self.high)
         return out
+
+    def dtype(self):
+        return np.dtype(np.float64)
 
 
 @dataclass(frozen=True)
@@ -144,6 +172,13 @@ class Conditional(_BaseRule):
 
     def depends_on(self) -> tuple[str, ...]:
         return (self.on,)
+
+    def dtype(self):
+        """Resolved from the branches, so it cannot depend on which branch a
+        chunk happened to contain. An integer branch beside a float branch
+        gives float, and any branch that declares nothing gives nothing."""
+        branches = list(self.cases.values()) + ([self.default] if self.default else [])
+        return _widest_dtype([declared_dtype(rule) for rule in branches])
 
     def draw(self, keys, *, seed, salt, frame=None):
         if frame is None or self.on not in frame.columns:
@@ -198,6 +233,45 @@ class Sequential(_BaseRule):
 
 def _subset(frame: pd.DataFrame | None, mask: np.ndarray) -> pd.DataFrame | None:
     return None if frame is None else frame.loc[mask]
+
+
+def _scalar_dtype(value: Any) -> np.dtype | None:
+    """A numeric or boolean value's dtype, or None for anything else.
+
+    Text and mixed values stay object. Narrowing those would gain nothing and
+    would risk changing a value on the way.
+    """
+    dtype = np.asarray([value]).dtype
+    return dtype if dtype.kind in "ifb" else None
+
+
+def _widest_dtype(declared: list[np.dtype | None]) -> np.dtype | None:
+    """The one type that holds all of them, or None if any declines to say.
+
+    The `is None` test is deliberate. `np.dtype("float64") == None` is True,
+    because numpy reads None as its default float dtype, so `None in declared`
+    silently answers yes for any float column.
+    """
+    if not declared or any(dtype is None for dtype in declared):
+        return None
+    return np.result_type(*declared)
+
+
+def declared_dtype(rule: Rule) -> np.dtype | None:
+    """What a rule says its column holds.
+
+    Read through `getattr` because `dtype` is an optional part of the protocol.
+    A custom rule written before it existed simply declares nothing, and its
+    column is left exactly as it was drawn.
+    """
+    declare = getattr(rule, "dtype", None)
+    return declare() if callable(declare) else None
+
+
+def as_declared(rule: Rule, values: np.ndarray) -> np.ndarray:
+    """Values in the type their rule declares."""
+    dtype = declared_dtype(rule)
+    return values if dtype is None else values.astype(dtype)
 
 
 def resolve_order(rules: Mapping[str, Rule], available: Iterable[str] = ()) -> list[str]:

@@ -436,12 +436,6 @@ def test_missing_values_round_trip_through_parquet(tmp_path):
     assert written["education"].isna().sum() == expected["education"].isna().sum()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I12: the writer's schema is fixed by the first chunk, so a column "
-    "whose python type varies from chunk to chunk aborts the run partway "
-    "through and leaves a truncated file",
-)
 def test_parquet_survives_a_column_whose_type_varies_between_chunks(tmp_path):
     pytest.importorskip("pyarrow")
     # Skewed so most chunks hold only the integer branch and a later one
@@ -469,11 +463,6 @@ def test_parquet_survives_a_column_whose_type_varies_between_chunks(tmp_path):
     assert len(pd.read_parquet(tmp_path / "small" / "t.parquet")) == 400
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I13: a table with no rows never opens a writer, so the file the run "
-    "promised is simply absent and a reader gets FileNotFoundError",
-)
 def test_a_table_with_no_rows_still_writes_a_readable_file(tmp_path):
     pytest.importorskip("pyarrow")
     person = sw.Entity(
@@ -494,11 +483,6 @@ def test_a_table_with_no_rows_still_writes_a_readable_file(tmp_path):
 # --- prior joints -----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I15: Prior builds a 2-D array from the tuple keys of a joint, which "
-    "_hash.pick rejects outright, so the joint path has never run",
-)
 def test_a_joint_prior_shapes_the_relationship_it_declares():
     """The documented reason joints exist: a published cross-tabulation.
 
@@ -543,18 +527,12 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
 # --- the numeric heuristic --------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I17: _is_numeric calls a column numeric at 90% numeric, then hands "
-    "the raw values to a regressor, so the sentinel values crash sklearn",
-)
 def test_a_numeric_column_with_a_few_sentinel_values_still_fits(people):
     """Survey data: an amount column with a handful of 'refused' answers.
 
-    Under the 10% threshold the column is declared numeric and the strings go
-    straight to a regressor. Over it, the same column is treated as
-    categorical and works. More contamination should not be the thing that
-    makes a fit succeed.
+    The old heuristic called this column numeric because 95% of it parsed,
+    then handed the raw strings to a regressor. Nothing guesses now: an object
+    column is fitted as categories unless the user says otherwise.
     """
     rows = 2_000
     refused = 100  # 5%, comfortably under the 0.9 numeric threshold
@@ -575,3 +553,206 @@ def test_a_numeric_column_with_a_few_sentinel_values_still_fits(people):
     ).run()["t"]
 
     assert len(result) == 400
+
+
+def test_a_column_can_be_declared_numeric_when_its_dtype_does_not_say_so(people):
+    """The explicit override, for an object column that really does hold numbers."""
+    real = pd.DataFrame(
+        {
+            "education": ["HS", "College"] * 500,
+            "amount": [str(v) for v in np.linspace(10, 100, 1_000)],
+        }
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"amount": sw.Constant("0")}
+    )
+    result = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=1),
+        synthesizer=sw.CARTSynthesizer(
+            ["amount"],
+            tables=["t"],
+            predictors=["education"],
+            numeric=["amount"],
+            structure=sw.Empirical(real),
+        ),
+    ).run()["t"]
+
+    assert pd.to_numeric(result["amount"]).between(10, 100).all()
+
+
+def test_declaring_an_unparseable_column_numeric_says_which_column(people):
+    """The failure names the column instead of surfacing from inside sklearn."""
+    real = pd.DataFrame(
+        {"education": ["HS", "College"] * 500, "amount": ["12"] * 999 + ["refused"]}
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"amount": sw.Constant("0")}
+    )
+    with pytest.raises(ValueError, match="'amount'.*not numbers"):
+        sw.Pipeline(
+            sw.Schema(entities=[people], tables=[table], seed=1),
+            synthesizer=sw.CARTSynthesizer(
+                ["amount"],
+                tables=["t"],
+                predictors=["education"],
+                numeric=["amount"],
+                structure=sw.Empirical(real),
+            ),
+        ).run()
+
+
+def test_a_rule_that_declares_no_dtype_still_works(people):
+    """The dtype hook is optional, so a rule written before it keeps working."""
+
+    class LegacyRule:
+        """No dtype method at all, exactly like a third-party rule from v0.1."""
+
+        def draw(self, keys, *, seed, salt, frame=None):
+            return np.array(["x"] * len(keys), dtype=object)
+
+        def depends_on(self):
+            return ()
+
+    table = sw.Table("t", grain=sw.PerEntity("person"), columns={"legacy": LegacyRule()})
+    result = sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1)).run()["t"]
+
+    assert set(result["legacy"]) == {"x"}
+
+
+def test_a_joint_prior_is_chunk_invariant(people):
+    """Invariant 2 on the surface I15 opened up."""
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"employed": sw.Choice([True, False], [0.5, 0.5])},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=1)
+    prior = sw.Prior(
+        marginals={"education": {"HS": 0.6, "College": 0.4}, "employed": {True: 0.5, False: 0.5}},
+        joints={
+            ("education", "employed"): {
+                ("HS", True): 0.30,
+                ("HS", False): 0.30,
+                ("College", True): 0.38,
+                ("College", False): 0.02,
+            }
+        },
+        rows=2_000,
+    )
+    invariants.assert_chunk_invariant(
+        schema,
+        synthesizer=sw.CARTSynthesizer(
+            ["employed"], tables=["t"], predictors=["education"], structure=prior
+        ),
+    )
+
+
+def test_declaring_a_column_numeric_is_recorded_in_provenance(people):
+    """It decides regressor against classifier, so it shapes output and is tagged."""
+    real = pd.DataFrame(
+        {"education": ["HS", "College"] * 500, "amount": [str(v) for v in np.linspace(1, 9, 1_000)]}
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"amount": sw.Constant("0")}
+    )
+    result = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=1),
+        synthesizer=sw.CARTSynthesizer(
+            ["amount"],
+            tables=["t"],
+            predictors=["education"],
+            numeric=["amount"],
+            structure=sw.Empirical(real),
+        ),
+    ).run()
+
+    record = result.provenance.to_frame()
+    assert "t.synth.numeric" in set(record["path"])
+    assert result.metadata["t"]["synthesize"]["numeric"] == ["amount"]
+
+
+def test_an_undeclared_column_type_that_shifts_between_chunks_names_itself(tmp_path):
+    """The residual case rules cannot cover.
+
+    Sequential wraps an arbitrary function, so it cannot say in advance what
+    it produces. A widening shift is absorbed silently. A narrowing one would
+    have to change the value, so the write stops with the column named rather
+    than with a pyarrow schema dump. Fractions are rare here on purpose, so
+    the first chunk is whole numbers and the file schema is fixed as integer.
+    """
+    pytest.importorskip("pyarrow")
+    person = sw.Entity(
+        "person", count=400, attributes={"a": sw.Constant("x")}, identifiers=[sw.Identifier("id")]
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        identifiers=["id"],
+        columns={
+            "n": sw.Integer(1, 1_000),
+            "half": sw.Sequential(
+                "n", lambda s: np.asarray([v / 2 if v % 199 == 0 else v for v in s])
+            ),
+        },
+    )
+    schema = sw.Schema(entities=[person], tables=[table], seed=4)
+
+    with pytest.raises(ValueError, match="'half'.*changed type|changed type.*'half'"):
+        sw.Pipeline(schema, chunk_size=7).run_to(tmp_path / "out", format="parquet")
+
+
+def test_an_empty_table_writes_the_same_columns_as_a_full_one(tmp_path):
+    """The empty file is the same shape as the file that would have been."""
+    pytest.importorskip("pyarrow")
+    person = sw.Entity(
+        "person",
+        count=5,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    full = sw.Table("t", grain=sw.PerEntity("person"), carry=["education"], identifiers=["tax_id"])
+    empty = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        coverage=0.001,
+    )
+
+    sw.Pipeline(sw.Schema(entities=[person], tables=[full], seed=4)).run_to(
+        tmp_path / "full", format="parquet"
+    )
+    sw.Pipeline(sw.Schema(entities=[person], tables=[empty], seed=4)).run_to(
+        tmp_path / "empty", format="parquet"
+    )
+
+    written = pd.read_parquet(tmp_path / "empty" / "t.parquet")
+    assert list(written.columns) == list(pd.read_parquet(tmp_path / "full" / "t.parquet").columns)
+    assert len(written) == 0
+
+
+def test_a_widening_type_shift_between_chunks_is_absorbed(tmp_path):
+    """The other direction: integers arriving after a float column started it."""
+    pytest.importorskip("pyarrow")
+    person = sw.Entity(
+        "person", count=400, attributes={"a": sw.Constant("x")}, identifiers=[sw.Identifier("id")]
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        identifiers=["id"],
+        columns={
+            "n": sw.Integer(1, 100),
+            "half": sw.Sequential(
+                "n", lambda s: np.asarray([v / 2 if v % 7 == 0 else v for v in s])
+            ),
+        },
+    )
+    schema = sw.Schema(entities=[person], tables=[table], seed=4)
+
+    sw.Pipeline(schema, chunk_size=7).run_to(tmp_path / "out", format="parquet")
+    written = pd.read_parquet(tmp_path / "out" / "t.parquet")
+
+    assert len(written) == 400
+    assert written["half"].dtype == "float64"

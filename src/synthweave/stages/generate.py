@@ -28,7 +28,7 @@ import pandas as pd
 from .. import _hash
 from ..context import RunContext
 from ..registry import register
-from ..rules import resolve_order
+from ..rules import as_declared, resolve_order
 from ..schema import PerEntity, PerEvent, PerPeriod, Table
 from ..validation import ENTITY_KEY
 from .base import own
@@ -157,8 +157,8 @@ class RuleGenerator:
                 name in entity.attributes[c].depends_on() for c in needed
             ):
                 continue
-            drawn[name] = entity.attributes[name].draw(
-                keys, seed=ctx.seed, salt=f"entity\x00{entity.name}\x00{name}", frame=drawn
+            drawn[name] = _draw(
+                entity.attributes[name], keys, ctx, f"entity\x00{entity.name}\x00{name}", drawn
             )
         return pd.concat([chunk, drawn[list(table.carry)]], axis=1)
 
@@ -169,11 +169,16 @@ class RuleGenerator:
         chunk = own(chunk)
         keys = chunk["_sw_row"].to_numpy()
         for name in resolve_order(table.columns, available=table.carry):
-            chunk[name] = table.columns[name].draw(
-                keys, seed=ctx.seed, salt=f"table\x00{table.name}\x00{name}", frame=chunk
+            chunk[name] = _draw(
+                table.columns[name], keys, ctx, f"table\x00{table.name}\x00{name}", chunk
             )
         return chunk
 
     @staticmethod
     def _entity_keys(entity_name: str, start: int, stop: int) -> np.ndarray:
         return np.array([f"{entity_name}:{i}" for i in range(start, stop)], dtype=object)
+
+
+def _draw(rule, keys, ctx, salt: str, frame: pd.DataFrame) -> np.ndarray:
+    """One column's values, in the type its rule declares."""
+    return as_declared(rule, rule.draw(keys, seed=ctx.seed, salt=salt, frame=frame))

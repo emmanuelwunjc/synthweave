@@ -23,6 +23,11 @@ from typing import Any, Mapping, Sequence
 from .provenance import Tagged, as_tagged
 from .rules import Rule
 
+# 10**19 already exceeds the unsigned 64-bit range the hash reduces into, so
+# the modulus stops bounding the value and identifiers come back at mixed
+# widths. 18 is the largest width the derivation can actually honour.
+MAX_DIGITS = 18
+
 
 @dataclass(frozen=True)
 class Identifier:
@@ -43,6 +48,12 @@ class Identifier:
             raise ValueError("Identifier needs a non-empty tag")
         if self.digits < 1:
             raise ValueError(f"Identifier {self.tag!r}: digits must be at least 1")
+        if self.digits > MAX_DIGITS:
+            raise ValueError(
+                f"Identifier {self.tag!r}: digits must be at most {MAX_DIGITS}, because "
+                f"10**{self.digits} does not fit the 64-bit hash the derivation uses. "
+                f"Past that the values stop being the width you asked for."
+            )
 
 
 @dataclass
@@ -82,6 +93,10 @@ class PerEntity:
 
     entity: str
 
+    def emitted_column(self) -> str | None:
+        """The column this grain produces, beyond the entity's own."""
+        return None
+
 
 @dataclass(frozen=True)
 class PerPeriod:
@@ -97,9 +112,18 @@ class PerPeriod:
     presence: float | Tagged = 1.0
     period_column: str = "period"
 
+    def emitted_column(self) -> str | None:
+        return self.period_column
+
     def __post_init__(self):
         if len(self.periods) == 0:
             raise ValueError("PerPeriod needs at least one period")
+        repeated = sorted({p for p in self.periods if list(self.periods).count(p) > 1}, key=str)
+        if repeated:
+            # One row per entity per period is the whole promise of this grain.
+            # A repeated period breaks the panel key silently, and it is always
+            # a config slip rather than something anyone means.
+            raise ValueError(f"PerPeriod has repeated period(s) {repeated}")
         object.__setattr__(self, "presence", as_tagged(self.presence))
         if not 0.0 < self.presence.value <= 1.0:
             raise ValueError("PerPeriod presence must be in (0, 1]")
@@ -113,6 +137,9 @@ class PerEvent:
     low: int = 1
     high: int = 5
     occurrence_column: str = "occurrence"
+
+    def emitted_column(self) -> str | None:
+        return self.occurrence_column
 
     def __post_init__(self):
         if self.low < 0:
@@ -157,6 +184,19 @@ class Table:
     @property
     def entity(self) -> str:
         return self.grain.entity
+
+    def output_columns(self, *, with_identifiers: bool = True) -> list[str]:
+        """The columns this table produces, in the order a run emits them.
+
+        Known from config alone, before a single row exists. That is what lets
+        a table which ends up with no rows still hand back its shape instead of
+        an empty frame with nothing on it.
+        """
+        columns = list(self.identifiers) if with_identifiers else []
+        produced = self.grain.emitted_column()
+        if produced is not None:
+            columns.append(produced)
+        return columns + list(self.carry) + list(self.columns)
 
 
 @dataclass

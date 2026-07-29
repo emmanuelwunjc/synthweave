@@ -441,11 +441,6 @@ def test_a_two_entity_schema_is_chunk_invariant(two_entity_schema):
 # --- identifier tag collisions ----------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I11: the linker assigns identifiers last and nothing checks the tag "
-    "against table columns, so the declared column is silently destroyed",
-)
 def test_an_identifier_tag_cannot_overwrite_a_table_column():
     person = sw.Entity(
         "person",
@@ -464,10 +459,6 @@ def test_an_identifier_tag_cannot_overwrite_a_table_column():
         sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I11: same collision against a carried entity attribute",
-)
 def test_an_identifier_tag_cannot_overwrite_a_carried_attribute():
     person = sw.Entity(
         "person",
@@ -499,45 +490,27 @@ def _one_entity(**identifier_kwargs) -> sw.Schema:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I14: digits is unvalidated, so a keyspace smaller than the population "
-    "silently collapses distinct entities onto one identifier",
-)
 def test_a_digit_count_too_small_for_the_population_is_rejected():
-    with pytest.raises(sw.SchemaError, match="digits"):
+    """The birthday bound, not the raw keyspace, decides what is too narrow."""
+    with pytest.raises(sw.SchemaError, match="share an identifier"):
         sw.Pipeline(_one_entity(prefix="I", digits=1)).run()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I14: 10**19 exceeds the uint64 modulus, so identifiers come out at "
-    "mixed widths instead of the requested one",
-)
 def test_identifiers_all_have_the_requested_width():
-    values = sw.Pipeline(_one_entity(prefix="I", digits=19)).run()["t"]["id"]
+    values = sw.Pipeline(_one_entity(prefix="I", digits=18)).run()["t"]["id"]
     widths = {len(v) - 1 for v in values}
-    assert widths == {19}, f"asked for 19 digits, got widths {sorted(widths)}"
+    assert widths == {18}, f"asked for 18 digits, got widths {sorted(widths)}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I14: digits >= 20 overflows uint64 and surfaces as OverflowError from "
-    "numpy rather than a config error naming the problem",
-)
 def test_a_digit_count_past_the_hash_width_is_rejected():
-    with pytest.raises(sw.SchemaError, match="digits"):
-        sw.Pipeline(_one_entity(prefix="I", digits=20)).run()
+    """Rejected where it is declared, before anything runs."""
+    with pytest.raises(ValueError, match="digits must be at most 18"):
+        sw.Identifier("id", prefix="I", digits=20)
 
 
 # --- empty output -----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I13: a table that emits no rows returns a frame with no columns, so "
-    "downstream code cannot even read its schema",
-)
 def test_a_table_that_emits_no_rows_still_has_its_columns():
     person = sw.Entity(
         "person",
@@ -616,17 +589,10 @@ def test_sequential_derives_a_column_from_another(people):
 # --- grain edge cases -------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I16: a repeated period is accepted, so the panel comes out with "
-    "duplicate (entity, period) keys and every join on them fans out",
-)
-def test_a_repeated_period_is_rejected(people):
-    table = sw.Table(
-        "panel", grain=sw.PerPeriod("person", periods=[2020, 2020, 2021]), identifiers=["tax_id"]
-    )
-    with pytest.raises(sw.SchemaError, match="period"):
-        sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1)).run()
+def test_a_repeated_period_is_rejected():
+    """One row per entity per period is the grain's whole promise."""
+    with pytest.raises(ValueError, match="repeated period"):
+        sw.PerPeriod("person", periods=[2020, 2020, 2021])
 
 
 def test_period_order_does_not_change_the_panel(people):

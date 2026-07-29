@@ -117,7 +117,7 @@ class Pipeline:
         """
         ctx = self._context()
         tables = {
-            table.name: _concat(self._stream(table, ctx), table.name)
+            table.name: _concat(self._stream(table, ctx), self._columns_of(table))
             for table in self.schema.tables
         }
         return PipelineResult(tables=tables, provenance=ctx.provenance, metadata=ctx.metadata)
@@ -137,7 +137,9 @@ class Pipeline:
         paths: dict[str, str] = {}
 
         for table in self.schema.tables:
-            writer = ChunkWriter(out, table.name, format=format)
+            writer = ChunkWriter(
+                out, table.name, format=format, columns=self._columns_of(table)
+            )
             rows = 0
             for chunk in self._stream(table, ctx):
                 writer.write(chunk)
@@ -146,6 +148,11 @@ class Pipeline:
             ctx.report(table.name, "output", rows=rows, path=paths[table.name])
 
         return PipelineResult(provenance=ctx.provenance, metadata=ctx.metadata, paths=paths)
+
+    def _columns_of(self, table) -> list[str]:
+        """What this pipeline will emit for a table, identifiers included only
+        when a linker is actually configured to attach them."""
+        return table.output_columns(with_identifiers=self.linker is not None)
 
     def stream(self, table_name: str) -> Iterator[pd.DataFrame]:
         """Chunks for one table, for a caller doing its own streaming."""
@@ -158,10 +165,14 @@ def _strip_reserved(chunks: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         yield chunk.drop(columns=drop) if drop else chunk
 
 
-def _concat(chunks: Iterator[pd.DataFrame], name: str) -> pd.DataFrame:
+def _concat(chunks: Iterator[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
     collected = [c for c in chunks if len(c)]
     if not collected:
-        return pd.DataFrame()
+        # A table can legitimately end up with no rows, most often because
+        # coverage excluded every entity. Handing back a frame with no columns
+        # would mean downstream code cannot even read the schema it was
+        # promised, so the declared columns stand in.
+        return pd.DataFrame(columns=columns)
     if len(collected) == 1:
         return collected[0].reset_index(drop=True)
     return pd.concat(collected, ignore_index=True)

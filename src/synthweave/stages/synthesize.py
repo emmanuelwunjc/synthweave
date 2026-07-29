@@ -110,11 +110,15 @@ class Prior:
         # A joint overrides the two marginals it spans, so declared pairwise
         # structure survives into the training frame.
         for (left, right), dist in self.joints.items():
-            pairs = np.array(list(dist.keys()), dtype=object)
+            pairs = list(dist.keys())
             weights = np.array(list(dist.values()), dtype=float)
-            picked = _hash.pick(keys, ctx.seed, f"prior\x00{left}\x00{right}", pairs, weights)
-            frame[left] = [p[0] for p in picked]
-            frame[right] = [p[1] for p in picked]
+            # Pick over positions, not over the pairs themselves. Handing the
+            # tuples to `pick` builds a 2-D array, and `pick` is a 1-D
+            # primitive by contract, so it rejected every joint outright.
+            positions = np.arange(len(pairs), dtype=object)
+            chosen = _hash.pick(keys, ctx.seed, f"prior\x00{left}\x00{right}", positions, weights)
+            frame[left] = [pairs[i][0] for i in chosen]
+            frame[right] = [pairs[i][1] for i in chosen]
 
         return frame
 
@@ -134,6 +138,9 @@ class CARTSynthesizer:
             the named columns.
         predictors: columns to condition on but not resynthesize, such as
             carried entity attributes.
+        numeric: columns to fit as numbers even though their dtype does not
+            say so, such as an object column holding numeric strings. Values
+            that will not parse raise, naming the column.
         structure: where to learn from. Defaults to `Declared`.
         fit_cap: maximum rows to fit on. Below this, every row is used.
         max_depth, min_samples_leaf: tree controls. Shallow trees generalize
@@ -146,6 +153,7 @@ class CARTSynthesizer:
         *,
         tables: Sequence[str] | None = None,
         predictors: Sequence[str] = (),
+        numeric: Sequence[str] = (),
         structure: Any = None,
         fit_cap: int | Any = None,
         max_depth: int | None = None,
@@ -156,6 +164,7 @@ class CARTSynthesizer:
         self.columns = list(columns)
         self.tables = set(tables) if tables is not None else None
         self.predictors = list(predictors)
+        self.numeric = set(numeric)
         self.structure = structure or Declared()
         self.fit_cap = as_tagged(fit_cap) if fit_cap is not None else modeled(
             DEFAULT_FIT_CAP, "library default fit cap"
@@ -179,6 +188,11 @@ class CARTSynthesizer:
             return
 
         cap = ctx.provenance.add(f"{table.name}.synth.fit_cap", self.fit_cap)
+        if self.numeric:
+            ctx.provenance.add(
+                f"{table.name}.synth.numeric",
+                modeled(sorted(self.numeric), "columns declared numeric by the user"),
+            )
         leaf = ctx.provenance.add(f"{table.name}.synth.min_samples_leaf", self.min_samples_leaf)
 
         train = self.structure.training_frame(table, ctx)
@@ -210,7 +224,7 @@ class CARTSynthesizer:
             )
 
         model = _FittedCART(
-            self.columns, self.predictors, self.max_depth, leaf
+            self.columns, self.predictors, self.max_depth, leaf, self.numeric
         ).fit(train)
 
         ctx.report(
@@ -220,6 +234,7 @@ class CARTSynthesizer:
             fit_cap=cap,
             sampled=sampled,
             columns=list(self.columns),
+            numeric=sorted(self.numeric),
             source=type(self.structure).__name__,
         )
 
@@ -235,11 +250,12 @@ def _chain(first: list[pd.DataFrame], rest: Iterator[pd.DataFrame]) -> Iterator[
 class _FittedCART:
     """Trees plus per-leaf donor pools, one per synthesized column."""
 
-    def __init__(self, columns, predictors, max_depth, min_samples_leaf):
+    def __init__(self, columns, predictors, max_depth, min_samples_leaf, numeric=()):
         self.columns = columns
         self.predictors = predictors
         self.max_depth = max_depth
         self.min_samples_leaf = min_samples_leaf
+        self.numeric = set(numeric)
         self.codes: dict[str, dict[Any, int]] = {}
         self.trees: dict[str, Any] = {}
         self.donors: dict[str, dict[int, np.ndarray]] = {}
@@ -257,7 +273,7 @@ class _FittedCART:
         self.dtypes = {column: train[column].dtype for column in self.columns}
 
         for column in self.columns + self.predictors:
-            if not _is_numeric(train[column]):
+            if not self._numeric(column, train[column]):
                 cats = pd.unique(train[column].dropna())
                 self.codes[column] = {v: i for i, v in enumerate(cats)}
 
@@ -274,7 +290,7 @@ class _FittedCART:
                 continue
             X = self._encode(train, features)
             y = train[target]
-            numeric = _is_numeric(y)
+            numeric = self._numeric(target, y)
             tree = (
                 DecisionTreeRegressor(
                     max_depth=self.max_depth, min_samples_leaf=self.min_samples_leaf
@@ -284,7 +300,7 @@ class _FittedCART:
                     max_depth=self.max_depth, min_samples_leaf=self.min_samples_leaf
                 )
             )
-            y_fit = y.to_numpy() if numeric else self._encode_column(target, y)
+            y_fit = self._as_numbers(target, y) if numeric else self._encode_column(target, y)
             tree.fit(X, y_fit)
             self.trees[target] = (tree, features)
 
@@ -327,6 +343,32 @@ class _FittedCART:
             out[target] = self._restore(target, values)
         return out
 
+    def _numeric(self, column: str, series: pd.Series) -> bool:
+        """Whether to fit this column as numbers.
+
+        The column's dtype answers this, which it can do now that rules
+        declare what they produce. Guessing from the values used to be the
+        answer, and it meant a column of amounts with a handful of `refused`
+        entries was called numeric at 95% parseable and then handed to a
+        regressor unconverted. `numeric=` is the explicit override for an
+        object column that really does hold numbers.
+        """
+        return column in self.numeric or pd.api.types.is_numeric_dtype(series)
+
+    def _as_numbers(self, column: str, series: pd.Series) -> np.ndarray:
+        """Numbers for the fit, failing by name rather than from inside sklearn."""
+        if pd.api.types.is_numeric_dtype(series):
+            return series.to_numpy()
+        converted = pd.to_numeric(series, errors="coerce")
+        bad = series[converted.isna() & series.notna()]
+        if len(bad):
+            raise ValueError(
+                f"column {column!r} was declared numeric but holds {len(bad)} value(s) "
+                f"that are not numbers, e.g. {sorted(set(bad.astype(str)))[:3]}. "
+                f"Clean them, or drop the column from `numeric` to fit it as categories."
+            )
+        return converted.to_numpy()
+
     def _restore(self, column: str, values: np.ndarray) -> np.ndarray:
         """Give sampled donor values back the dtype the fit saw.
 
@@ -350,7 +392,3 @@ class _FittedCART:
         return series.map(lambda v: mapping.get(v, -1)).to_numpy(dtype=float)
 
 
-def _is_numeric(series: pd.Series) -> bool:
-    return pd.api.types.is_numeric_dtype(pd.to_numeric(series, errors="coerce").dropna()) and (
-        pd.to_numeric(series, errors="coerce").notna().mean() > 0.9
-    )
