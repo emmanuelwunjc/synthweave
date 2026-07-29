@@ -376,3 +376,165 @@ def test_synthesis_does_not_hide_a_numeric_column_behind_object_dtype(careers):
     assert "tenure" in out.select_dtypes("number").columns, (
         f"tenure came back as {out['tenure'].dtype}, so no numeric operation sees it"
     )
+
+
+# --- parquet output ---------------------------------------------------------
+#
+# Only CSV was covered before. Parquet is the format that matters at the scale
+# this library targets, and it is stricter: a ParquetWriter fixes its schema
+# from the first chunk, so every later chunk has to agree with it.
+
+
+def _small_schema(**column_overrides) -> sw.Schema:
+    person = sw.Entity(
+        "person",
+        count=600,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    columns = {"hours": sw.Integer(10, 50)}
+    columns.update(column_overrides)
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns=columns,
+    )
+    return sw.Schema(entities=[person], tables=[table], seed=4)
+
+
+def test_parquet_output_carries_the_same_values_as_the_in_memory_run(tmp_path):
+    """Choosing a format must not choose a dataset.
+
+    Dtypes are compared loosely on purpose. Conditional columns arrive as
+    object dtype from the generator (I10) and Parquet resolves them to a real
+    type on the way back, so a strict comparison would be testing I10 rather
+    than the writer.
+    """
+    pytest.importorskip("pyarrow")
+    schema = _small_schema()
+    expected = sw.Pipeline(schema).run()["t"]
+
+    sw.Pipeline(schema).run_to(tmp_path / "out", format="parquet")
+    written = pd.read_parquet(tmp_path / "out" / "t.parquet")
+
+    pd.testing.assert_frame_equal(written, expected, check_dtype=False)
+
+
+def test_missing_values_round_trip_through_parquet(tmp_path):
+    """Missing noise puts None in an object column. pyarrow must keep it null."""
+    pytest.importorskip("pyarrow")
+    schema = _small_schema()
+    noiser = sw.Noise({"t": {"hours": [sw.Missing(0.2)], "education": [sw.Missing(0.2)]}})
+    expected = sw.Pipeline(schema, noiser=noiser).run()["t"]
+
+    sw.Pipeline(schema, noiser=noiser, chunk_size=97).run_to(tmp_path / "out", format="parquet")
+    written = pd.read_parquet(tmp_path / "out" / "t.parquet")
+
+    assert written["hours"].isna().sum() == expected["hours"].isna().sum()
+    assert written["education"].isna().sum() == expected["education"].isna().sum()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I12: the writer's schema is fixed by the first chunk, so a column "
+    "whose python type varies from chunk to chunk aborts the run partway "
+    "through and leaves a truncated file",
+)
+def test_parquet_survives_a_column_whose_type_varies_between_chunks(tmp_path):
+    pytest.importorskip("pyarrow")
+    # Skewed so most chunks hold only the integer branch and a later one
+    # carries a float. That is enough to change the inferred arrow type.
+    person = sw.Entity(
+        "person",
+        count=400,
+        attributes={"education": sw.Choice(["HS", "College"], [0.97, 0.03])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns={
+            "mixed": sw.Conditional(
+                "education", {"HS": sw.Integer(0, 10), "College": sw.Normal(5.0, 1.0)}
+            )
+        },
+    )
+    schema = sw.Schema(entities=[person], tables=[table], seed=4)
+
+    sw.Pipeline(schema, chunk_size=7).run_to(tmp_path / "small", format="parquet")
+    assert len(pd.read_parquet(tmp_path / "small" / "t.parquet")) == 400
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I13: a table with no rows never opens a writer, so the file the run "
+    "promised is simply absent and a reader gets FileNotFoundError",
+)
+def test_a_table_with_no_rows_still_writes_a_readable_file(tmp_path):
+    pytest.importorskip("pyarrow")
+    person = sw.Entity(
+        "person",
+        count=5,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], coverage=0.001
+    )
+    schema = sw.Schema(entities=[person], tables=[table], seed=4)
+
+    sw.Pipeline(schema).run_to(tmp_path / "out", format="parquet")
+    assert len(pd.read_parquet(tmp_path / "out" / "t.parquet")) == 0
+
+
+# --- prior joints -----------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I15: Prior builds a 2-D array from the tuple keys of a joint, which "
+    "_hash.pick rejects outright, so the joint path has never run",
+)
+def test_a_joint_prior_shapes_the_relationship_it_declares():
+    """The documented reason joints exist: a published cross-tabulation.
+
+    The marginals alone say nothing about how education and employment move
+    together. The joint says College is almost always employed, and that is
+    what the synthesized data should show.
+    """
+    person = sw.Entity(
+        "person",
+        count=800,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"employed": sw.Choice([True, False], [0.5, 0.5])},
+    )
+    prior = sw.Prior(
+        marginals={"education": {"HS": 0.6, "College": 0.4}, "employed": {True: 0.5, False: 0.5}},
+        joints={
+            ("education", "employed"): {
+                ("HS", True): 0.30,
+                ("HS", False): 0.30,
+                ("College", True): 0.38,
+                ("College", False): 0.02,
+            }
+        },
+    )
+    result = sw.Pipeline(
+        sw.Schema(entities=[person], tables=[table], seed=1),
+        synthesizer=sw.CARTSynthesizer(
+            ["employed"], tables=["t"], predictors=["education"], structure=prior
+        ),
+    ).run()["t"]
+
+    rates = result.groupby("education")["employed"].mean()
+    assert rates["College"] > rates["HS"] + 0.2

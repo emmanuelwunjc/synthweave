@@ -27,6 +27,15 @@ out/
 # decisions that matter are restated in docs/specs/.
 docs/brainstorms/
 
+# Claude Code. CLAUDE.md and .claude/settings.json are shared instructions and
+# belong in the repo, exactly like CONTRIBUTING.md. Only per-developer local
+# overrides are ignored.
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Browser automation scratch output
+.playwright-mcp/
+
 # Editors and OS
 .DS_Store
 .idea/

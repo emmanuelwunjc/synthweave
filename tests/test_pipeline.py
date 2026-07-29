@@ -10,6 +10,7 @@ import warnings
 import pandas as pd
 import pytest
 
+import invariants
 import synthweave as sw
 
 
@@ -375,3 +376,238 @@ def test_reserved_column_names_are_rejected(people):
     table = sw.Table("bad", grain=sw.PerEntity("person"), columns={"_sw_row": sw.Constant(1)})
     with pytest.raises(sw.SchemaError, match="reserved"):
         sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
+
+
+# --- multiple entities ------------------------------------------------------
+#
+# Every test above this line uses a single entity. These drive the cross-entity
+# paths: separate identifier spaces, separate attribute draws, and a schema
+# whose entity order should not matter.
+
+
+@pytest.fixture
+def two_entity_schema() -> sw.Schema:
+    """Two entities that collide on purpose.
+
+    Same attribute name, same identifier tag, same prefix, same digit count.
+    Anything that keys on those names alone rather than on the entity will
+    show up as one entity's data appearing in the other's table.
+    """
+    make = lambda name: sw.Entity(  # noqa: E731
+        name,
+        count=500,
+        attributes={"region": sw.Choice(["N", "S"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("id", prefix="X", digits=9)],
+    )
+    return sw.Schema(
+        entities=[make("person"), make("firm")],
+        tables=[
+            sw.Table("people", grain=sw.PerEntity("person"), carry=["region"], identifiers=["id"]),
+            sw.Table("firms", grain=sw.PerEntity("firm"), carry=["region"], identifiers=["id"]),
+        ],
+        seed=42,
+    )
+
+
+def test_two_entities_do_not_share_an_identifier_space(two_entity_schema):
+    """Invariant 4 read the other way: identity must not merge across entities."""
+    result = sw.Pipeline(two_entity_schema).run()
+    shared = set(result["people"]["id"]) & set(result["firms"]["id"])
+    assert not shared, f"{len(shared)} identifier(s) refer to both a person and a firm"
+
+
+def test_two_entities_draw_their_attributes_independently(two_entity_schema):
+    result = sw.Pipeline(two_entity_schema).run()
+    assert list(result["people"]["region"][:50]) != list(result["firms"]["region"][:50])
+
+
+def test_entity_order_in_the_schema_does_not_change_the_output(two_entity_schema):
+    """Invariant 3 at schema level. Reordering config is not a data change."""
+    forward = sw.Pipeline(two_entity_schema).run()
+    reversed_schema = sw.Schema(
+        entities=list(reversed(two_entity_schema.entities)),
+        tables=two_entity_schema.tables,
+        seed=two_entity_schema.seed,
+    )
+    backward = sw.Pipeline(reversed_schema).run()
+    for name in forward.tables:
+        pd.testing.assert_frame_equal(backward[name], forward[name])
+
+
+def test_a_two_entity_schema_is_chunk_invariant(two_entity_schema):
+    invariants.assert_chunk_invariant(two_entity_schema)
+
+
+# --- identifier tag collisions ----------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I11: the linker assigns identifiers last and nothing checks the tag "
+    "against table columns, so the declared column is silently destroyed",
+)
+def test_an_identifier_tag_cannot_overwrite_a_table_column():
+    person = sw.Entity(
+        "person",
+        count=50,
+        attributes={"education": sw.Choice(["HS", "College"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("wage", prefix="W", digits=9)],
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["wage"],
+        columns={"wage": sw.Normal(50_000, 5_000, low=0)},
+    )
+    with pytest.raises(sw.SchemaError, match="wage"):
+        sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I11: same collision against a carried entity attribute",
+)
+def test_an_identifier_tag_cannot_overwrite_a_carried_attribute():
+    person = sw.Entity(
+        "person",
+        count=50,
+        attributes={"education": sw.Choice(["HS", "College"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("education", prefix="E", digits=9)],
+    )
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], identifiers=["education"]
+    )
+    with pytest.raises(sw.SchemaError, match="education"):
+        sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
+
+
+# --- identifier digit extremes ----------------------------------------------
+
+
+def _one_entity(**identifier_kwargs) -> sw.Schema:
+    person = sw.Entity(
+        "person",
+        count=50,
+        attributes={"a": sw.Constant("x")},
+        identifiers=[sw.Identifier("id", **identifier_kwargs)],
+    )
+    return sw.Schema(
+        entities=[person],
+        tables=[sw.Table("t", grain=sw.PerEntity("person"), identifiers=["id"])],
+        seed=1,
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I14: digits is unvalidated, so a keyspace smaller than the population "
+    "silently collapses distinct entities onto one identifier",
+)
+def test_a_digit_count_too_small_for_the_population_is_rejected():
+    with pytest.raises(sw.SchemaError, match="digits"):
+        sw.Pipeline(_one_entity(prefix="I", digits=1)).run()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I14: 10**19 exceeds the uint64 modulus, so identifiers come out at "
+    "mixed widths instead of the requested one",
+)
+def test_identifiers_all_have_the_requested_width():
+    values = sw.Pipeline(_one_entity(prefix="I", digits=19)).run()["t"]["id"]
+    widths = {len(v) - 1 for v in values}
+    assert widths == {19}, f"asked for 19 digits, got widths {sorted(widths)}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I14: digits >= 20 overflows uint64 and surfaces as OverflowError from "
+    "numpy rather than a config error naming the problem",
+)
+def test_a_digit_count_past_the_hash_width_is_rejected():
+    with pytest.raises(sw.SchemaError, match="digits"):
+        sw.Pipeline(_one_entity(prefix="I", digits=20)).run()
+
+
+# --- empty output -----------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="I13: a table that emits no rows returns a frame with no columns, so "
+    "downstream code cannot even read its schema",
+)
+def test_a_table_that_emits_no_rows_still_has_its_columns():
+    person = sw.Entity(
+        "person",
+        count=5,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        coverage=0.001,
+    )
+    empty = sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=4)).run()["t"]
+
+    assert len(empty) == 0
+    assert set(empty.columns) == {"education", "tax_id"}
+
+
+# --- edge cases that turned out to be sound ---------------------------------
+
+
+def test_event_grain_allows_entities_with_no_events(people):
+    """PerEvent(low=0) means some entities genuinely never appear."""
+    table = sw.Table("ev", grain=sw.PerEvent("person", low=0, high=3), identifiers=["tax_id"])
+    result = sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=4)).run()["ev"]
+
+    assert result["tax_id"].nunique() < 400
+    assert len(result) > 0
+
+
+def test_typos_leave_missing_values_alone(many_people):
+    """Missing runs first, so Typo must skip nulls rather than stringify them."""
+    noiser = sw.Noise({"roster": {"education": [sw.Missing(0.5), sw.Typo(0.9)]}})
+    roster = sw.Table("roster", grain=sw.PerEntity("person"), carry=["education"])
+    schema = sw.Schema(entities=[many_people], tables=[roster], seed=1)
+
+    values = sw.Pipeline(schema, noiser=noiser).run()["roster"]["education"]
+    written = {v for v in values if v is not None}
+    assert not any("None" in v for v in written)
+
+
+def test_typo_corrupts_non_ascii_values_without_breaking(people):
+    """Character indexing must be by character, not by byte."""
+    entity = sw.Entity(
+        "person",
+        count=200,
+        attributes={"name": sw.Choice(["北京市", "Ünüver", "Ωμέγα"], [0.34, 0.33, 0.33])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table("t", grain=sw.PerEntity("person"), carry=["name"])
+    result = sw.Pipeline(
+        sw.Schema(entities=[entity], tables=[table], seed=1),
+        noiser=sw.Noise({"t": {"name": [sw.Typo(0.5)]}}),
+    ).run()["t"]
+
+    assert result["name"].notna().all()
+    assert (~result["name"].isin(["北京市", "Ünüver", "Ωμέγα"])).any()
+
+
+def test_sequential_derives_a_column_from_another(people):
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["birth_year"],
+        columns={"age": sw.Sequential("birth_year", lambda year: 2026 - year)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=1)
+    result = sw.Pipeline(schema).run()["t"]
+
+    assert (result["birth_year"] + result["age"] == 2026).all()
+    invariants.assert_chunk_invariant(schema)
