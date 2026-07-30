@@ -1,3 +1,13 @@
+# What this repo publishes is the package and its tests. Everything else is
+# real work that stays on this machine: issue logs, specs, brainstorms, session
+# handoffs, the worked examples, the dev tooling, and the agent instructions.
+# The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
+docs/
+examples/
+tools/
+demo/
+CLAUDE.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -22,14 +32,8 @@ htmlcov/
 output/
 out/
 
-# Internal working notes. The brainstorm transcripts name internal projects,
-# local paths, and collaborators, so they stay out of the public repo. The
-# decisions that matter are restated in docs/specs/.
-docs/brainstorms/
-
-# Claude Code. CLAUDE.md and .claude/settings.json are shared instructions and
-# belong in the repo, exactly like CONTRIBUTING.md. Only per-developer local
-# overrides are ignored.
+# Claude Code local overrides. CLAUDE.md itself is ignored above, since the
+# instructions in it are for this machine rather than for the world.
 .claude/settings.local.json
 CLAUDE.local.md
 

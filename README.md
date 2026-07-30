@@ -75,8 +75,12 @@ result["wages"].head()
 A person's `tax_id` is the same string in `roster` and in `wages`. Nothing was
 looked up to make that true.
 
-There is a fuller, three-table example in
-[`examples/linked_admin_records.py`](examples/linked_admin_records.py).
+Or run it in a browser.
+[synthweave-frontend](https://github.com/emmanuelwunjc/synthweave-frontend) is a
+local front end that runs this pipeline, checks the linking guarantee against
+the produced data, and re-runs your config at three chunk sizes to show the
+output is identical. It ships a three-table worked example and a walkthrough
+deck.
 
 ## Core ideas
 
@@ -217,27 +221,25 @@ One implementation ships per stage; the interfaces are the commitment, so
 adding implementations should not require restructuring.
 
 Not yet included: R interop, deep generative synthesizers, disclosure-risk
-metrics, differential privacy. See
-[`docs/specs/synthweave-v0.1.md`](docs/specs/synthweave-v0.1.md) for full scope,
-[`docs/ISSUES.md`](docs/ISSUES.md) for known issues, and
-[`docs/HANDOFF.md`](docs/HANDOFF.md) for the current session handoff.
+metrics, differential privacy.
+
+Known issues and the design notes behind them are tracked in
+[the issue tracker](https://github.com/emmanuelwunjc/synthweave/issues) rather
+than in the repo.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 PYTHONPATH=src python -m pytest tests/ -q
-python tools/mutation_check.py                # see below
 ```
 
 Tests run offline and go through the public API only, so stage internals can be
 rewritten without touching them.
 
-`tools/mutation_check.py` reverts each fix recorded in
-[`docs/ISSUES.md`](docs/ISSUES.md) one at a time and checks that a test
-actually goes red. A fix nothing catches is not a fix, and this has already
-found two issues that were marked resolved while having no coverage at all.
-Run it after fixing anything.
+Every bug fix is checked by reverting it and confirming a test goes red. A fix
+nothing catches is not a fix, and that check has already found two issues that
+were marked resolved while having no coverage at all.
 
 ## License
 
