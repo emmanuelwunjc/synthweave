@@ -126,6 +126,84 @@ def test_a_structure_source_missing_a_column_fails_loudly(people):
         ).run()
 
 
+# --- structure= shorthand coercion -------------------------------------
+
+
+def test_structure_accepts_a_bare_dataframe_same_as_empirical(people):
+    """A DataFrame handed to structure= is wrapped in Empirical automatically."""
+    real = pd.DataFrame(
+        {
+            "education": ["HS"] * 300 + ["College"] * 300,
+            "wage": list(np.linspace(20_000, 30_000, 300))
+            + list(np.linspace(80_000, 90_000, 300)),
+        }
+    )
+    table = sw.Table(
+        "earnings",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"wage": sw.Constant(0.0)},
+    )
+    explicit = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=9),
+        synthesizer=sw.CARTSynthesizer(
+            ["wage"], tables=["earnings"], predictors=["education"], structure=sw.Empirical(real)
+        ),
+    ).run()["earnings"]
+    bare = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=9),
+        synthesizer=sw.CARTSynthesizer(
+            ["wage"], tables=["earnings"], predictors=["education"], structure=real
+        ),
+    ).run()["earnings"]
+    assert explicit.equals(bare)
+
+
+def test_structure_accepts_a_bare_mapping_same_as_prior(people):
+    """A dict handed to structure= is wrapped in Prior(marginals=...) automatically."""
+    table = sw.Table(
+        "survey", grain=sw.PerEntity("person"), columns={"tenure": sw.Constant("unknown")}
+    )
+    marginals = {"tenure": {"own": 0.65, "rent": 0.35}}
+    explicit = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=11),
+        synthesizer=sw.CARTSynthesizer(
+            ["tenure"], tables=["survey"], structure=sw.Prior(marginals=marginals)
+        ),
+    ).run()["survey"]
+    bare = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=11),
+        synthesizer=sw.CARTSynthesizer(["tenure"], tables=["survey"], structure=marginals),
+    ).run()["survey"]
+    assert explicit.equals(bare)
+
+
+def test_structure_resolves_a_registered_name(people):
+    """The "structure" registry kind is actually resolved now, not dead weight.
+
+    Empirical/Prior/Declared register themselves under "structure" but
+    nothing looked names up in that registry before this fix, so a caller
+    passing structure="empirical" silently got the string back rather than
+    an Empirical instance. Proven here with a throwaway registered stub
+    instead of "empirical" itself, so this test does not depend on how the
+    built-in structure sources happen to be named.
+    """
+
+    class _Stub:
+        def training_frame(self, table, ctx):
+            return pd.DataFrame({"x": [1, 2, 3] * 100})
+
+    sw.register("structure", "test-stub-structure-source")(_Stub)
+    table = sw.Table("t", grain=sw.PerEntity("person"), columns={"x": sw.Constant(0)})
+    result = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=1),
+        synthesizer=sw.CARTSynthesizer(
+            ["x"], tables=["t"], structure="test-stub-structure-source"
+        ),
+    ).run()["t"]
+    assert set(result["x"].unique()) <= {1, 2, 3}
+
+
 # --- the fit cap ------------------------------------------------------------
 
 

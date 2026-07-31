@@ -35,7 +35,7 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from .. import _hash
 from ..context import RunContext
 from ..provenance import as_tagged, modeled
-from ..registry import register
+from ..registry import register, resolve
 from ..schema import Table
 from .base import buffer_to
 
@@ -123,6 +123,27 @@ class Prior:
         return frame
 
 
+def _coerce_structure(structure: Any) -> Any:
+    """A structure source as given, or inferred from a plainer value.
+
+    `None` -> `Declared()`. A registered name (`"empirical"`, `"prior"`,
+    `"declared"`, or a third party's own registration) -> resolved through
+    the same `"structure"` registry `Empirical`/`Prior`/`Declared` register
+    themselves into. Real data already in hand -> `Empirical(structure)`.
+    Aggregate stats already in hand -> `Prior(marginals=structure)`. Anything
+    else (an already-built structure source instance) passes through as-is.
+    """
+    if structure is None:
+        return Declared()
+    if isinstance(structure, str):
+        return resolve("structure", structure)
+    if isinstance(structure, pd.DataFrame):
+        return Empirical(structure)
+    if isinstance(structure, Mapping):
+        return Prior(marginals=structure)
+    return structure
+
+
 # --- the synthesizer --------------------------------------------------------
 
 
@@ -141,7 +162,10 @@ class CARTSynthesizer:
         numeric: columns to fit as numbers even though their dtype does not
             say so, such as an object column holding numeric strings. Values
             that will not parse raise, naming the column.
-        structure: where to learn from. Defaults to `Declared`.
+        structure: where to learn from. Defaults to `Declared`. Also accepts
+            a `pd.DataFrame` directly (wrapped in `Empirical`), a `Mapping`
+            directly (wrapped in `Prior(marginals=...)`), or a name
+            registered under the `"structure"` kind.
         fit_cap: maximum rows to fit on. Below this, every row is used.
         max_depth, min_samples_leaf: tree controls. Shallow trees generalize
             more and disclose less.
@@ -165,7 +189,7 @@ class CARTSynthesizer:
         self.tables = set(tables) if tables is not None else None
         self.predictors = list(predictors)
         self.numeric = set(numeric)
-        self.structure = structure or Declared()
+        self.structure = _coerce_structure(structure)
         self.fit_cap = as_tagged(fit_cap) if fit_cap is not None else modeled(
             DEFAULT_FIT_CAP, "library default fit cap"
         )
