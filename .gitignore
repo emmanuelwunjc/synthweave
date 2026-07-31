@@ -19,6 +19,13 @@ dist/
 .venv/
 venv/
 
+# Secrets. Never committed, read at runtime by src/synthweave/connectors/.
+.env
+.env.local
+
+# Cached connector responses (e.g. ACS PUMS), regenerable from the API.
+.synthweave_cache/
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
