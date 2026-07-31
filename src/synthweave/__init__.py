@@ -52,6 +52,7 @@ identifiers are derived from (seed, entity, tag) rather than looked up.
 
 from ._hash import derive_id
 from .context import RunContext
+from .fidelity import FidelityReport, fidelity_report
 from .pipeline import Pipeline, PipelineResult
 from .provenance import ProvenanceRecord, Tagged, cited, modeled, user
 from .registry import available, register, resolve
@@ -83,6 +84,8 @@ __all__ = [
     "Conditional", "Sequential",
     # pipeline
     "Pipeline", "PipelineResult", "RunContext",
+    # fidelity
+    "fidelity_report", "FidelityReport",
     # stages
     "RuleGenerator", "CARTSynthesizer", "Noise", "DeterministicLinker",
     "Declared", "Empirical", "Prior",

@@ -199,6 +199,47 @@ class CARTSynthesizer:
             if not isinstance(min_samples_leaf, int)
             else modeled(min_samples_leaf, "library default leaf size")
         )
+        # Populated per table by `run`, read back by `donor_diagnostics`.
+        # `synthweave.fidelity.fidelity_report` is the reason this exists: it
+        # takes a fitted synthesizer to surface leaves that fell back to a
+        # placeholder value, something the two output frames alone can't show.
+        # Keyed by table name, not by run: reusing one `CARTSynthesizer`
+        # instance across more than one `Pipeline` run for the same table
+        # overwrites the earlier fit's entry. `_complete` exists because
+        # `run` is a generator — fitting (and registering `_fitted`) happens
+        # before the first chunk is even pulled, but `empty_donor_counts`
+        # only finishes accumulating once every chunk has actually been
+        # applied. Without it, `donor_diagnostics` could hand back a
+        # snapshot mid-stream and it would look identical to a complete one.
+        self._fitted: dict[str, "_FittedCART"] = {}
+        self._complete: dict[str, bool] = {}
+
+    def donor_diagnostics(self, table: str | None = None) -> dict[str, dict[str, int]]:
+        """Empty-donor-leaf fallback counts from the last fit, by table and column.
+
+        A count above zero for a (table, column) pair means some rows in that
+        table's synthesized `column` landed in a decision-tree leaf with no
+        donor rows, and kept their pre-synthesis placeholder value instead of
+        a real synthesized one. A table is absent until a pipeline has fully
+        run this synthesizer for it: `Pipeline.run()`/`run_to()` always reach
+        that point, but a caller manually driving `Pipeline.stream()` and
+        inspecting diagnostics before consuming every chunk sees the table
+        stay absent rather than get a real but incomplete count.
+        `table=None` (the default) returns every table finished so far.
+
+        Reflects the *last* fit only: reusing one `CARTSynthesizer` instance
+        across more than one `Pipeline` run for the same table replaces the
+        earlier run's counts rather than combining them.
+        """
+        if table is not None:
+            model = self._fitted.get(table)
+            complete = self._complete.get(table, False)
+            return {table: dict(model.empty_donor_counts)} if model and complete else {}
+        return {
+            name: dict(model.empty_donor_counts)
+            for name, model in self._fitted.items()
+            if self._complete.get(name, False)
+        }
 
     def run(
         self, chunks: Iterator[pd.DataFrame], table: Table, ctx: RunContext
@@ -250,6 +291,8 @@ class CARTSynthesizer:
         model = _FittedCART(
             self.columns, self.predictors, self.max_depth, leaf, self.numeric
         ).fit(train)
+        self._fitted[table.name] = model
+        self._complete[table.name] = False
 
         ctx.report(
             table.name,
@@ -264,6 +307,7 @@ class CARTSynthesizer:
 
         for chunk in _chain(replay, chunks):
             yield model.apply(chunk, ctx.seed, table.name)
+        self._complete[table.name] = True
 
 
 def _chain(first: list[pd.DataFrame], rest: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
@@ -285,6 +329,9 @@ class _FittedCART:
         self.donors: dict[str, dict[int, np.ndarray]] = {}
         self.dtypes: dict[str, Any] = {}
         self.marginal: np.ndarray | None = None
+        # Rows that landed in a leaf with no donors and kept their
+        # pre-synthesis value, accumulated across every chunk `apply` sees.
+        self.empty_donor_counts: dict[str, int] = {}
 
     def fit(self, train: pd.DataFrame) -> "_FittedCART":
         # Donor sampling runs through object arrays, because a leaf's pool is
@@ -361,6 +408,9 @@ class _FittedCART:
                 pool = self.donors[target].get(leaf)
                 if pool is None or len(pool) == 0:
                     values[mask] = out[target].to_numpy(dtype=object)[mask]
+                    self.empty_donor_counts[target] = (
+                        self.empty_donor_counts.get(target, 0) + int(mask.sum())
+                    )
                     continue
                 take = np.minimum((pos[mask] * len(pool)).astype(int), len(pool) - 1)
                 values[mask] = pool[take]
