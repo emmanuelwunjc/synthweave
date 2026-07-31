@@ -27,7 +27,7 @@ Issues = "https://github.com/emmanuelwunjc/synthweave/issues"
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=12"]
-dev = ["pytest>=7", "pyarrow>=12"]
+dev = ["pytest>=7", "pyarrow>=12", "pyflakes>=3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/synthweave"]
