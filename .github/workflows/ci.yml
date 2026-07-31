@@ -21,4 +21,4 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: PYTHONPATH=src python3 -m pytest tests/ -q
-      - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ examples/
+      - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ $([ -d examples ] && echo examples/)
