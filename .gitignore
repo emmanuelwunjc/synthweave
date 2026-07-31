@@ -1,9 +1,10 @@
-# What this repo publishes is the package and its tests. Everything else is
-# real work that stays on this machine: issue logs, specs, brainstorms, session
-# handoffs, the worked examples, the dev tooling, and the agent instructions.
+# What this repo publishes is the package, its tests, and the worked
+# examples/guide the README points to. Everything else is real work that
+# stays on this machine: issue logs, specs, brainstorms, session handoffs,
+# the dev tooling, and the agent instructions.
 # The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
-docs/
-examples/
+docs/*
+!docs/GUIDE.md
 tools/
 demo/
 CLAUDE.md
