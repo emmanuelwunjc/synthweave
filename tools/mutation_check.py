@@ -245,6 +245,16 @@ MUTATIONS = [
         "    if False:",
     ),
     (
+        "empty-donor invariant: donor map covers every leaf",
+        "src/synthweave/stages/synthesize.py",
+        """            self.donors[target] = {
+                leaf: raw[leaves == leaf] for leaf in np.unique(leaves)
+            }""",
+        """            self.donors[target] = {
+                leaf: raw[leaves == leaf] for leaf in np.unique(leaves)[1:]
+            }""",
+    ),
+    (
         "#12 carry=* unknown entity raises SchemaError with table context",
         "src/synthweave/schema.py",
         '            raise SchemaError(f"table {table.name!r}: {e.args[0]}") from e',

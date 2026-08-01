@@ -311,15 +311,26 @@ resampled or smoothed distribution. This matters two ways:
   from — `min_samples_leaf` (default `5`) is the main lever to keep that
   count from getting too small if the columns you condition on could be
   identifying.
-- **Empty leaves:** if a leaf ends up with no donor rows at all, the
-  synthesizer does not fall back to the overall marginal or refit anything —
-  it leaves that row's value exactly as the generator drew it *before*
-  synthesis ran (whatever placeholder rule the column originally had, e.g.
-  `sw.Constant("unknown")`). Sparse leaves don't degrade gracefully to "close
-  enough"; they can leak an untouched placeholder value into what looks like
-  synthesized output. Widening `min_samples_leaf` or lowering `max_depth`
-  reduces how often this happens. `sw.fidelity_report`, next, can count how
-  often it actually did.
+- **Empty leaves cannot happen, and the counter proves it rather than
+  measures it.** Earlier versions of this guide described a leaf with no
+  donor rows as ordinary behaviour to tune around. It isn't reachable.
+  `fit` builds each column's donor pools from the leaves the training data
+  actually lands in, and scikit-learn creates a leaf only by partitioning
+  training samples, so every leaf holds at least one row. The donor map
+  therefore covers every leaf the tree can produce, and no input row can
+  reach one that is missing, however unlike the training data it is.
+
+  The fallback branch still exists, and `fidelity_report`'s
+  `empty_donor_leaves` still reports it, but read it as an assertion about
+  the library rather than a property of your data: it is zero by
+  construction, and a non-zero value means the fit/apply symmetry has been
+  broken and you have found a bug. A test pins this
+  (`test_no_leaf_is_ever_donorless_however_hard_you_push`), so if it ever
+  becomes reachable it fails there first.
+
+  `min_samples_leaf` still matters, just not for this. It controls how many
+  real values a leaf can draw from, which is a disclosure concern (above),
+  not a correctness one.
 
 ### `sw.fidelity_report(synth_df, real_df, columns=[...], thresholds=None, synthesizer=None)`
 

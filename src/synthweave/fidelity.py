@@ -17,10 +17,13 @@ Three checks, each comparing real vs. synthesized:
                    ratio / eta (numeric-categorical, any category count).
     empty donors   per column, only when a fitted `CARTSynthesizer` is
                    passed in: rows that landed in a decision-tree leaf with
-                   no donor rows and silently kept their pre-synthesis
-                   placeholder value instead of a real synthesized one. Good
-                   aggregate marginal/association numbers can still mask
-                   this happening on individual leaves.
+                   no donor rows and kept their pre-synthesis placeholder
+                   instead of a synthesized value. This is zero by
+                   construction, not a measurement of the data: a leaf
+                   exists only because training rows partitioned into it, so
+                   every leaf has donors and no row can reach one without.
+                   Read a non-zero value as a bug in synthweave rather than
+                   anything about the input.
 """
 
 from __future__ import annotations

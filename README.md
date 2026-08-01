@@ -264,8 +264,11 @@ never sends anything.
 declares whatever structure it wants. `Empirical` is different: it fits on real
 data, and the point is that output carries the same marginal distributions,
 category shares, and pairwise associations the input had. The report compares
-both, and with `synthesizer=` also reports how many rows kept a pre-synthesis
-placeholder because their leaf had no donors.
+both, and with `synthesizer=` also reports `empty_donor_leaves`. That last one
+is zero by construction rather than a measurement of your data: every
+decision-tree leaf holds at least one training row, so no row can land in a
+donorless one. A non-zero value means a bug in synthweave, not a property of
+your input.
 
 </details>
 
