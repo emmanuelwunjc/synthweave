@@ -22,3 +22,35 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: PYTHONPATH=src python3 -m pytest tests/ -q
       - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ $([ -d examples ] && echo examples/)
+
+  # Hooks are wired locally too (`pre-commit install`), but a local hook is
+  # bypassable with --no-verify and absent on a fresh clone, so the real gate
+  # is here.
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # pyflakes runs as a `local` hook against the system interpreter, so the
+      # package's own dev extras have to be present for it to resolve.
+      - run: pip install -e ".[dev]"
+      - uses: pre-commit/action@v3.0.1
+
+  # This repo's definition of done: a fix is not done until reverting it turns
+  # the suite red. It used to be enforced by memory alone, which is how two
+  # issues were once logged as fixed with no regression coverage at all.
+  # Its own job so `test` still reports quickly; this one rebuilds the suite
+  # per mutation and takes minutes.
+  mutation-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[dev]"
+      # Fails on MISSED (a fix nothing catches) and on STALE (an entry whose
+      # snippet or file no longer matches, which verified nothing at all).
+      - run: python3 tools/mutation_check.py
