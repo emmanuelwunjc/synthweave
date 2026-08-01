@@ -42,7 +42,8 @@ So when you fix something:
 2. Fix it.
 3. Add an entry to `MUTATIONS` in `tools/mutation_check.py` and confirm it
    reports `CAUGHT`.
-4. Log it in `docs/ISSUES.md` with its status and what covers it.
+4. Close the GitHub issue with a comment naming the fix and the test that
+   covers it, so the reasoning survives outside the diff.
 
 A `STALE` entry fails the run too. A mutation whose snippet no longer matches
 the code verified nothing, and silently reads as a pass.
