@@ -341,3 +341,51 @@ def test_donor_diagnostics_excludes_a_table_still_mid_stream(schema):
     list(stream)  # drain the rest
 
     assert "wages" in synth.donor_diagnostics()
+
+
+def test_no_leaf_is_ever_donorless_however_hard_you_push(people):
+    """`empty_donor_leaves` is zero by construction, not by luck.
+
+    `fit` builds donor pools from `np.unique(tree.apply(X_train))`, and
+    sklearn creates a leaf only by partitioning training samples, so every
+    leaf in the tree holds at least one training row. The donor map
+    therefore covers every leaf the tree can produce, and an inference row
+    cannot reach one that is absent, no matter how unlike the training data
+    it is.
+
+    This test exists because `GUIDE.md` and the README described empty
+    leaves as ordinary behaviour that nobody had ever reproduced. It pins
+    the invariant so a future change that breaks the fit/apply symmetry
+    fails here rather than silently making a documented-but-dead counter
+    start moving.
+    """
+    # Adversarial on every axis available: tiny leaves so the tree splits as
+    # finely as it can, synthesis values disjoint from the training range,
+    # and a category present at inference that the fit never saw.
+    real = pd.DataFrame(
+        {
+            "education": ["HS"] * 300 + ["College"] * 300,
+            "wage": list(np.linspace(1.0, 2.0, 600)),
+        }
+    )
+    table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"wage": sw.Constant(10_000.0)},
+    )
+    synth = sw.CARTSynthesizer(
+        ["wage"],
+        tables=["t"],
+        predictors=["education"],
+        structure=sw.Empirical(real),
+        min_samples_leaf=1,
+        max_depth=None,
+    )
+    sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=3), synthesizer=synth).run()
+
+    assert synth.donor_diagnostics() == {"t": {}}, (
+        "a leaf came back donorless, which the fit/apply symmetry should make "
+        "impossible; if this is now reachable the docs describing it are right "
+        "and this test is what needs changing"
+    )
