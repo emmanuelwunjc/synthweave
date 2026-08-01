@@ -67,11 +67,23 @@ and SSNs.
 ```python
 import synthweave as sw
 
-people = sw.Entity("person", count=10_000, attributes={"education": ["HS", "College"]})
-table  = sw.Table("roster", grain="person", carry="*")
-result = sw.Pipeline(sw.Schema([people], [table])).run()
+people = sw.Entity("person", count=10_000,
+                   attributes={"education": ["HS", "College"],
+                               "birth_year": sw.Integer(1960, 2005)},
+                   identifiers=["tax_id"])
 
-result["roster"].head()
+roster = sw.Table("roster", grain="person", carry="*", identifiers=["tax_id"])
+
+result = sw.Pipeline(sw.Schema([people], [roster], seed=7)).run()
+print(result["roster"].head(4))
+```
+
+```text
+    tax_id education  birth_year
+9509912293        HS        1983
+7347177053        HS        1990
+0931814884        HS        1969
+2374398424   College        1963
 ```
 
 Ten thousand rows. No data file, no API key, no setup beyond `pip install`.
@@ -79,6 +91,10 @@ Ten thousand rows. No data file, no API key, no setup beyond `pip install`.
 That is the whole shape of synthweave: describe a population once (`Entity`),
 describe a table that records it (`Table`), run it (`Pipeline`). Everything
 below is a variation on those three lines.
+
+Run it again with `seed=7` on any machine, at any `chunk_size`, and you get
+those same four rows. Add a second table carrying `tax_id` and the same
+person keeps the same id in both, with no lookup table anywhere.
 
 ## Why synthweave
 

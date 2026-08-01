@@ -1,15 +1,18 @@
 # What this repo publishes is the package, its tests, the worked
-# examples/guide the README points to, the issue log, and the dev tooling
-# that gates a fix (tools/mutation_check.py). Those last two are tracked
-# deliberately: an issue log and a coverage gate that live only on one
-# machine cannot be audited, cannot be restored, and cannot run in CI.
+# examples and guide the README points to, and the dev tooling that gates a
+# fix (tools/mutation_check.py). `tools/` is tracked because CI runs it: the
+# mutation-check job is a required status check, so unpublishing it would
+# break every PR.
+#
+# The issue log (docs/ISSUES.md) is deliberately NOT published. GitHub
+# Issues is the public tracker; docs/ISSUES.md is a working log with the
+# full reasoning behind each finding, and it stays local.
 # What still stays on this machine: specs, brainstorms, session handoffs,
 # and the agent instructions, which are working notes rather than a record
 # anyone else needs.
 # The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
 docs/*
 !docs/GUIDE.md
-!docs/ISSUES.md
 demo/
 CLAUDE.md
 
