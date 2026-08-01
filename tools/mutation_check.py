@@ -245,6 +245,27 @@ MUTATIONS = [
         "    if False:",
     ),
     (
+        "offline: surname weight is count * pct/100",
+        "src/synthweave/connectors/census_surnames.py",
+        """                self._data["count"].to_numpy(dtype=np.float64)
+                * self._data[column].to_numpy(dtype=np.float64)
+                / 100.0""",
+        """                self._data["count"].to_numpy(dtype=np.float64)""",
+    ),
+    (
+        "offline: address fields in a group share one row",
+        "src/synthweave/connectors/geonames.py",
+        'idx = _hash.integers(keys, seed, f"usaddress\\x00{self.group}", 0, len(self._data))',
+        'idx = _hash.integers(keys, seed, f"usaddress\\x00{salt}", 0, len(self._data))',
+    ),
+    (
+        "offline: SSA pool narrows to the requested sex",
+        "src/synthweave/connectors/ssa_names.py",
+        """        if sex is not None:
+            subset = subset[subset["sex"] == sex]""",
+        "",
+    ),
+    (
         "empty-donor invariant: donor map covers every leaf",
         "src/synthweave/stages/synthesize.py",
         """            self.donors[target] = {

@@ -10,11 +10,18 @@ import io
 import zipfile
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import invariants
 import synthweave as sw
-from synthweave.connectors.census_surnames import Surname, _fetch_and_parse
+from synthweave.connectors.census_surnames import (
+    _PCT_COLUMNS,
+    Surname,
+    _cache,
+    _fetch_and_parse,
+)
 
 FAKE_CSV = """name,rank,count,prop100k,cum_prop100k,pctwhite,pctblack,pctapi,pctaian,pct2prace,pcthispanic
 SMITH,1,1000,1,1,90,5,1,1,1,2
@@ -141,3 +148,69 @@ def test_unmapped_category_raises(real_surname_data):
     table = sw.Table("t", grain="person", carry="*")
     with pytest.raises(KeyError, match="no Census column mapped"):
         sw.Pipeline(sw.Schema([person], [table], seed=1)).run()
+
+
+# --- offline: the weighting math itself -------------------------------------
+# The tests above cover fetch and parse mechanics. These cover the arithmetic
+# the connector exists for, with no network and no skipping, by pre-writing
+# the cache the loader reads. Expected values are computed by hand from
+# FAKE_CSV rather than by re-running the formula under test.
+
+
+def _offline_surname(tmp_path, categories):
+    """A Surname rule over FAKE_CSV, with the cache pre-seeded."""
+    cache = tmp_path / "surnames_cache"
+    cache.mkdir()
+    frame = pd.read_csv(io.StringIO(FAKE_CSV))
+    frame = frame[frame["name"] != "ALL OTHER NAMES"].copy()
+    for column in ["count", *_PCT_COLUMNS]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    frame[["name", "count", *_PCT_COLUMNS]].to_csv(cache / "surnames.csv", index=False)
+    _cache.clear()
+    return Surname(on="race", categories=categories, cache_dir=cache)
+
+
+def test_pool_weights_are_count_times_percent(tmp_path):
+    """weight = count * pct/100, checked against hand-computed values.
+
+    From FAKE_CSV, for pctwhite: SMITH 1000 at 90% -> 900, NGUYEN 500 at 2%
+    -> 10, GONZALEZ 500 at 5% -> 25, SUPPRESSED 100 at 90% -> 90.
+    "ALL OTHER NAMES" is an aggregate row and must not appear at all.
+    """
+    rule = _offline_surname(tmp_path, {"white": "pctwhite"})
+    names, weights = rule._pool("pctwhite")
+
+    assert "ALL OTHER NAMES" not in set(names)
+    by_name = dict(zip(names, weights))
+    assert by_name == {"SMITH": 900.0, "NGUYEN": 10.0, "GONZALEZ": 25.0, "SUPPRESSED": 90.0}
+
+
+def test_a_suppressed_cell_weighs_zero_rather_than_being_guessed(tmp_path):
+    """`(S)` means Census withheld the cell, so it contributes nothing.
+
+    SUPPRESSED's pctapi is `(S)` in FAKE_CSV. Treating that as anything but
+    zero would invent a rate the Census deliberately did not publish.
+    """
+    rule = _offline_surname(tmp_path, {"api": "pctapi"})
+    names, weights = rule._pool("pctapi")
+    assert dict(zip(names, weights))["SUPPRESSED"] == 0.0
+
+
+def test_the_drawn_name_actually_follows_the_race_column(tmp_path):
+    """The joint distribution, end to end, offline.
+
+    NGUYEN carries 95% of the api weight in FAKE_CSV and GONZALEZ 90% of the
+    hispanic weight, so conditioning must send those groups to different
+    names. This is the property the connector exists for, and it was only
+    ever exercised by a network-gated test before.
+    """
+    rule = _offline_surname(tmp_path, {"api": "pctapi", "hispanic": "pcthispanic"})
+    frame = pd.DataFrame({"race": ["api"] * 200 + ["hispanic"] * 200})
+    keys = np.array([f"k{i}" for i in range(400)], dtype=object)
+
+    drawn = pd.Series(rule.draw(keys, seed=5, salt="surname", frame=frame))
+    api_names = drawn[:200].value_counts(normalize=True)
+    hispanic_names = drawn[200:].value_counts(normalize=True)
+
+    assert api_names.get("NGUYEN", 0) > 0.85
+    assert hispanic_names.get("GONZALEZ", 0) > 0.85
