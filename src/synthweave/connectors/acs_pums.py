@@ -192,8 +192,18 @@ def _request(url_with_key: str, url_for_errors: str) -> list[list[str]]:
 
 
 def _to_frame(payload: list[list[str]], variables: list[str], url: str) -> pd.DataFrame:
-    if not payload or len(payload) < 1:
-        raise RuntimeError(f"ACS PUMS response was empty: {url}")
+    # A header row with nothing under it is a request that matched nothing,
+    # not a successful fetch of zero people. The Census API returns exactly
+    # that for a filter matching no records, or a subtly wrong
+    # state/year/survey/variable combination. Letting it through produced an
+    # empty frame that only failed later, inside Empirical, with an error
+    # pointing nowhere near the request that was actually wrong.
+    if not payload or len(payload) <= 1:
+        raise RuntimeError(
+            f"ACS PUMS response contained no rows, only a header if that: {url}. "
+            "Usually the geography, year, survey or variable filter matched no "
+            "records; check those before assuming the API is down."
+        )
     header, *rows = payload
     frame = pd.DataFrame(rows, columns=header)
     for column in variables:
