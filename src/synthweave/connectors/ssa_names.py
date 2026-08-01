@@ -30,6 +30,7 @@ domain (a US federal government work).
 
 from __future__ import annotations
 
+import hashlib
 import io
 import urllib.error
 import urllib.request
@@ -137,12 +138,31 @@ class SSAFirstName:
         return pooled.index.to_numpy(dtype=object), pooled.to_numpy(dtype=np.float64)
 
 
+def _cache_filename(source: str | Path | None) -> str:
+    """Cache filename for one source, distinct per source.
+
+    The name used to be a constant, with `source` present only in the
+    in-memory memo key. A second `SSAFirstName` pointing at a different local
+    zip therefore found the first source's file already on disk and silently
+    returned its data, never reading the file it was given. The same
+    collision hit switching between a local source and a live fetch.
+
+    A live fetch keeps the original plain name, so existing caches stay
+    valid. A local source is hashed rather than slugged, because two paths
+    can share a basename and the full path is not filename-safe.
+    """
+    if source is None:
+        return "ssa_names.csv"
+    digest = hashlib.sha256(str(Path(source).resolve()).encode()).hexdigest()[:16]
+    return f"ssa_names.{digest}.csv"
+
+
 def _ssa_data(source: str | Path | None, cache_dir: str | Path | None) -> pd.DataFrame:
     memo_key = f"{source}|{cache_dir}"
     if memo_key in _cache:
         return _cache[memo_key]
 
-    cache_path = None if cache_dir is None else Path(cache_dir) / "ssa_names.csv"
+    cache_path = None if cache_dir is None else Path(cache_dir) / _cache_filename(source)
     if cache_path is not None and cache_path.exists():
         frame = pd.read_csv(cache_path)
         _cache[memo_key] = frame
