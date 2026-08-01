@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .provenance import Tagged, as_tagged
-from .rules import Rule
+from .rules import coerce_rule
 
 # 10**19 already exceeds the unsigned 64-bit range the hash reduces into, so
 # the modulus stops bounding the value and identifiers come back at mixed
@@ -62,13 +62,19 @@ class Entity:
 
     name: str
     count: int | Tagged
-    attributes: Mapping[str, Rule] = field(default_factory=dict)
-    identifiers: Sequence[Identifier] = field(default_factory=tuple)
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    identifiers: Sequence[Identifier | str] = field(default_factory=tuple)
 
     def __post_init__(self):
         self.count = as_tagged(self.count)
         if self.count.value < 1:
             raise ValueError(f"entity {self.name!r}: count must be at least 1")
+        self.attributes = {k: coerce_rule(v) for k, v in self.attributes.items()}
+        # A bare tag string is shorthand for Identifier(tag=that_string); an
+        # already-built Identifier passes through untouched.
+        self.identifiers = [
+            Identifier(tag=i) if isinstance(i, str) else i for i in self.identifiers
+        ]
         tags = [i.tag for i in self.identifiers]
         dupes = {t for t in tags if tags.count(t) > 1}
         if dupes:
@@ -157,11 +163,14 @@ class Table:
 
     Args:
         name: output table name.
-        grain: how entities map to rows.
-        columns: rules for columns generated at row level.
+        grain: how entities map to rows. A bare entity name string is
+            shorthand for `PerEntity(that_name)`.
+        columns: rules for columns generated at row level. A value that is
+            not already a `Rule` is coerced with `coerce_rule`.
         carry: entity attribute names to copy onto every row. These stay
             identical everywhere the entity appears, which is what makes a
-            person's birth date consistent across tables.
+            person's birth date consistent across tables. `"*"` carries
+            every attribute the table's entity has.
         identifiers: identifier tags this table carries. A table that lists
             none is unlinkable by construction, which is sometimes the point.
         coverage: share of the entity population appearing in this table.
@@ -170,13 +179,19 @@ class Table:
     """
 
     name: str
-    grain: Grain
-    columns: Mapping[str, Rule] = field(default_factory=dict)
-    carry: Sequence[str] = field(default_factory=tuple)
+    grain: Grain | str
+    columns: Mapping[str, Any] = field(default_factory=dict)
+    carry: Sequence[str] | str = field(default_factory=tuple)
     identifiers: Sequence[str] = field(default_factory=tuple)
     coverage: float | Tagged = 1.0
 
     def __post_init__(self):
+        # A bare entity name is shorthand for the common case, one row per
+        # covered entity. PerPeriod/PerEvent still need to be spelled out,
+        # since a bare name can't say which of those is meant either.
+        if isinstance(self.grain, str):
+            self.grain = PerEntity(self.grain)
+        self.columns = {k: coerce_rule(v) for k, v in self.columns.items()}
         self.coverage = as_tagged(self.coverage)
         if not 0.0 < self.coverage.value <= 1.0:
             raise ValueError(f"table {self.name!r}: coverage must be in (0, 1]")
@@ -206,6 +221,13 @@ class Schema:
     entities: Sequence[Entity]
     tables: Sequence[Table]
     seed: int | str = 0
+
+    def __post_init__(self):
+        # carry="*" needs the entity to resolve against, which only Schema
+        # can see; Table alone only knows its entity by name.
+        for table in self.tables:
+            if table.carry == "*":
+                table.carry = tuple(self.entity(table.entity).attributes.keys())
 
     def entity(self, name: str) -> Entity:
         for e in self.entities:
