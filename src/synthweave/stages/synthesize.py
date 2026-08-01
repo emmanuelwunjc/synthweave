@@ -26,6 +26,7 @@ tractable nor necessary.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -35,7 +36,7 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from .. import _hash
 from ..context import RunContext
 from ..provenance import as_tagged, modeled
-from ..registry import register
+from ..registry import register, registry, resolve
 from ..schema import Table
 from .base import buffer_to
 
@@ -123,6 +124,63 @@ class Prior:
         return frame
 
 
+class StructureConfigError(ValueError):
+    """A structure source was named that cannot be built from a name alone."""
+
+
+def _resolve_structure_name(name: str) -> Any:
+    """Resolve a registered structure name, or say why the name can't work.
+
+    Resolving a registered *class* means instantiating it with no arguments.
+    That works for `Declared` and for any third-party source that needs no
+    configuration, but `Empirical` needs a `frame` and `Prior` needs
+    `marginals`, and a bare string has no channel to carry either. Those
+    used to surface as `TypeError: Empirical.__init__() missing 1 required
+    positional argument: 'frame'`, which names the mechanism rather than the
+    fix. Check first and name the fix instead.
+    """
+    found = registry("structure").get(name)
+    if isinstance(found, type):
+        required = [
+            p.name
+            for p in inspect.signature(found).parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        ]
+        if required:
+            raise StructureConfigError(
+                f"structure={name!r} needs configuration a bare name cannot carry "
+                f"({', '.join(required)}). Pass a configured instance instead, "
+                f"e.g. structure={found.__name__}({required[0]}=...)."
+            )
+    return resolve("structure", name)
+
+
+def _coerce_structure(structure: Any) -> Any:
+    """A structure source as given, or inferred from a plainer value.
+
+    `None` -> `Declared()`. A registered name (`"declared"`, or a third
+    party's own registration that needs no configuration) -> resolved
+    through the same `"structure"` registry `Empirical`/`Prior`/`Declared`
+    register themselves into. `"empirical"`/`"prior"` are registered there
+    too but cannot be built from the name alone (they need a frame and
+    marginals respectively), so naming them raises `StructureConfigError`
+    pointing at the configured-instance form. Real data already in hand ->
+    `Empirical(structure)`. Aggregate stats already in hand ->
+    `Prior(marginals=structure)`. Anything else (an already-built structure
+    source instance) passes through as-is.
+    """
+    if structure is None:
+        return Declared()
+    if isinstance(structure, str):
+        return _resolve_structure_name(structure)
+    if isinstance(structure, pd.DataFrame):
+        return Empirical(structure)
+    if isinstance(structure, Mapping):
+        return Prior(marginals=structure)
+    return structure
+
+
 # --- the synthesizer --------------------------------------------------------
 
 
@@ -141,7 +199,14 @@ class CARTSynthesizer:
         numeric: columns to fit as numbers even though their dtype does not
             say so, such as an object column holding numeric strings. Values
             that will not parse raise, naming the column.
-        structure: where to learn from. Defaults to `Declared`.
+        structure: where to learn from. Defaults to `Declared`. Also accepts
+            a `pd.DataFrame` directly (wrapped in `Empirical`), a `Mapping`
+            directly (wrapped in `Prior(marginals=...)`), or the name of a
+            structure source registered under the `"structure"` kind that
+            needs no configuration (`"declared"`, or a third party's own).
+            `"empirical"`/`"prior"` cannot be named this way: they need a
+            frame and marginals respectively, which a bare string cannot
+            carry, so naming them raises `StructureConfigError`.
         fit_cap: maximum rows to fit on. Below this, every row is used.
         max_depth, min_samples_leaf: tree controls. Shallow trees generalize
             more and disclose less.
@@ -165,7 +230,7 @@ class CARTSynthesizer:
         self.tables = set(tables) if tables is not None else None
         self.predictors = list(predictors)
         self.numeric = set(numeric)
-        self.structure = structure or Declared()
+        self.structure = _coerce_structure(structure)
         self.fit_cap = as_tagged(fit_cap) if fit_cap is not None else modeled(
             DEFAULT_FIT_CAP, "library default fit cap"
         )
@@ -175,6 +240,47 @@ class CARTSynthesizer:
             if not isinstance(min_samples_leaf, int)
             else modeled(min_samples_leaf, "library default leaf size")
         )
+        # Populated per table by `run`, read back by `donor_diagnostics`.
+        # `synthweave.fidelity.fidelity_report` is the reason this exists: it
+        # takes a fitted synthesizer to surface leaves that fell back to a
+        # placeholder value, something the two output frames alone can't show.
+        # Keyed by table name, not by run: reusing one `CARTSynthesizer`
+        # instance across more than one `Pipeline` run for the same table
+        # overwrites the earlier fit's entry. `_complete` exists because
+        # `run` is a generator — fitting (and registering `_fitted`) happens
+        # before the first chunk is even pulled, but `empty_donor_counts`
+        # only finishes accumulating once every chunk has actually been
+        # applied. Without it, `donor_diagnostics` could hand back a
+        # snapshot mid-stream and it would look identical to a complete one.
+        self._fitted: dict[str, "_FittedCART"] = {}
+        self._complete: dict[str, bool] = {}
+
+    def donor_diagnostics(self, table: str | None = None) -> dict[str, dict[str, int]]:
+        """Empty-donor-leaf fallback counts from the last fit, by table and column.
+
+        A count above zero for a (table, column) pair means some rows in that
+        table's synthesized `column` landed in a decision-tree leaf with no
+        donor rows, and kept their pre-synthesis placeholder value instead of
+        a real synthesized one. A table is absent until a pipeline has fully
+        run this synthesizer for it: `Pipeline.run()`/`run_to()` always reach
+        that point, but a caller manually driving `Pipeline.stream()` and
+        inspecting diagnostics before consuming every chunk sees the table
+        stay absent rather than get a real but incomplete count.
+        `table=None` (the default) returns every table finished so far.
+
+        Reflects the *last* fit only: reusing one `CARTSynthesizer` instance
+        across more than one `Pipeline` run for the same table replaces the
+        earlier run's counts rather than combining them.
+        """
+        if table is not None:
+            model = self._fitted.get(table)
+            complete = self._complete.get(table, False)
+            return {table: dict(model.empty_donor_counts)} if model and complete else {}
+        return {
+            name: dict(model.empty_donor_counts)
+            for name, model in self._fitted.items()
+            if self._complete.get(name, False)
+        }
 
     def run(
         self, chunks: Iterator[pd.DataFrame], table: Table, ctx: RunContext
@@ -226,6 +332,8 @@ class CARTSynthesizer:
         model = _FittedCART(
             self.columns, self.predictors, self.max_depth, leaf, self.numeric
         ).fit(train)
+        self._fitted[table.name] = model
+        self._complete[table.name] = False
 
         ctx.report(
             table.name,
@@ -240,6 +348,7 @@ class CARTSynthesizer:
 
         for chunk in _chain(replay, chunks):
             yield model.apply(chunk, ctx.seed, table.name)
+        self._complete[table.name] = True
 
 
 def _chain(first: list[pd.DataFrame], rest: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
@@ -261,6 +370,9 @@ class _FittedCART:
         self.donors: dict[str, dict[int, np.ndarray]] = {}
         self.dtypes: dict[str, Any] = {}
         self.marginal: np.ndarray | None = None
+        # Rows that landed in a leaf with no donors and kept their
+        # pre-synthesis value, accumulated across every chunk `apply` sees.
+        self.empty_donor_counts: dict[str, int] = {}
 
     def fit(self, train: pd.DataFrame) -> "_FittedCART":
         # Donor sampling runs through object arrays, because a leaf's pool is
@@ -337,6 +449,9 @@ class _FittedCART:
                 pool = self.donors[target].get(leaf)
                 if pool is None or len(pool) == 0:
                     values[mask] = out[target].to_numpy(dtype=object)[mask]
+                    self.empty_donor_counts[target] = (
+                        self.empty_donor_counts.get(target, 0) + int(mask.sum())
+                    )
                     continue
                 take = np.minimum((pos[mask] * len(pool)).astype(int), len(pool) - 1)
                 values[mask] = pool[take]

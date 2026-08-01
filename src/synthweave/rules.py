@@ -103,6 +103,33 @@ class Choice(_BaseRule):
         return _widest_dtype([_scalar_dtype(v) for v in self.values])
 
 
+def coerce_rule(value: Any) -> Rule:
+    """A `Rule` as given, or inferred from a plain Python value.
+
+    A `list` or `tuple` becomes `Choice(values)` (equal weight). A single
+    `int`/`float`/`str`/`bool` becomes `Constant(value)`. Anything else
+    raises, naming the rule types to reach for instead.
+
+    Deliberately does not try to turn a bare pair of numbers into a range.
+    `"wage": (38_000, 9_000)` reads like `Normal(mean=38_000, sd=9_000)` to a
+    person and like `Integer(low=38_000, high=9_000)` (empty, since
+    `low > high`) to a naive 2-tuple-means-range rule. Guessing between those
+    is exactly the kind of silent-wrong-output bug worth never introducing,
+    so a range always needs `sw.Integer`/`sw.Uniform` written explicitly.
+    """
+    if isinstance(value, Rule):
+        return value
+    if isinstance(value, (list, tuple)):
+        return Choice(list(value))
+    if isinstance(value, (int, float, str, bool)):
+        return Constant(value)
+    raise TypeError(
+        f"{value!r} is not a Rule and cannot be inferred automatically. "
+        "Wrap it explicitly: sw.Integer(low, high), sw.Uniform(low, high), "
+        "sw.Normal(mean, sd), sw.Choice(values, weights), or sw.Constant(value)."
+    )
+
+
 @dataclass(frozen=True)
 class Integer(_BaseRule):
     """Uniform integers in [low, high)."""
@@ -169,6 +196,11 @@ class Conditional(_BaseRule):
     def __post_init__(self):
         if not self.cases:
             raise ValueError("Conditional needs at least one case")
+        object.__setattr__(
+            self, "cases", {k: coerce_rule(v) for k, v in self.cases.items()}
+        )
+        if self.default is not None:
+            object.__setattr__(self, "default", coerce_rule(self.default))
 
     def depends_on(self) -> tuple[str, ...]:
         return (self.on,)

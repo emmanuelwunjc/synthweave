@@ -194,6 +194,81 @@ def test_missingness_lands_near_the_configured_rate(many_people):
     assert 0.29 < result["records"]["amount"].isna().mean() < 0.31
 
 
+def test_missingness_rate_can_vary_by_row(many_people):
+    """Differential nonresponse: the rate itself conditions on another column.
+
+    A flat `rate` can only express MCAR, but real nonresponse correlates with
+    other attributes. `rate` therefore also accepts a vectorized function of
+    the chunk, the same escape hatch `Sequential.fn` already uses: it is
+    handed the frame and returns one rate per row.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    result = sw.Pipeline(
+        sw.Schema(entities=[many_people], tables=[table], seed=42),
+        noiser=sw.Noise(
+            {
+                "survey": {
+                    "amount": [sw.Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))]
+                }
+            }
+        ),
+    ).run()["survey"]
+
+    missing = result.groupby("education")["amount"].apply(lambda s: s.isna().mean())
+    assert 0.28 < missing["HS"] < 0.32
+    assert 0.04 < missing["College"] < 0.06
+
+
+def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
+    """A per-row rate must not weaken the two standing guarantees.
+
+    The corruption decision still routes through `unit(key, seed, salt) <
+    rate`, so the rate function only chooses the threshold; it never draws.
+    Chunking is the real risk here: the function is handed each chunk
+    separately, so a rate that depended on chunk-level state (a mean, a
+    position) rather than on the row would silently break this.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+    noiser = sw.Noise(
+        {"survey": {"amount": [sw.Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))]}}
+    )
+    invariants.assert_deterministic(schema, noiser=noiser)
+    invariants.assert_chunk_invariant(schema, noiser=noiser)
+
+
+def test_a_row_varying_rate_outside_zero_to_one_fails_loudly(people):
+    """A flat rate is range-checked at construction. A function cannot be.
+
+    Without a check after the call, a function returning 1.5 silently
+    corrupts every row and one returning -0.1 silently corrupts none. Both
+    produce a plausible-looking table rather than an error, which is the
+    failure mode this library treats as the expensive one.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+    noiser = sw.Noise(
+        {"survey": {"amount": [sw.Missing(lambda f: 0.05 + 2.0 * (f["education"] == "HS"))]}}
+    )
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+        sw.Pipeline(schema, noiser=noiser).run()
+
+
 def test_realized_noise_rate_is_reported(many_people):
     table = sw.Table("roster", grain=sw.PerEntity("person"), carry=["education"])
     result = sw.Pipeline(
