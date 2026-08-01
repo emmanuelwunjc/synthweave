@@ -6,6 +6,7 @@ whether the suite noticed.
 """
 
 import atexit
+import os
 import pathlib
 import signal
 import subprocess
@@ -222,26 +223,37 @@ MUTATIONS = [
 ]
 
 
-def run_suite() -> tuple[bool, str]:
+def run_suite() -> tuple[bool, str, str]:
+    # Inherit the real environment and override only PYTHONPATH. Replacing it
+    # outright used to work on a dev machine and fail on a CI runner, where
+    # the interpreter lives outside a hardcoded PATH and the suite needs
+    # variables (HOME among them) that a stripped env does not carry.
+    env = {**os.environ, "PYTHONPATH": "src"}
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/", "-q", "--no-header", "-x", "-W", "error::UserWarning"],
             cwd=ROOT,
-            env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin:/usr/local/bin"},
+            env=env,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return False, "suite timed out after 90s"
+        return False, "suite timed out after 300s", ""
+    output = proc.stdout + proc.stderr
     tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
-    return proc.returncode == 0, (tail[-1] if tail else "no output")
+    return proc.returncode == 0, (tail[-1] if tail else "no output"), output
 
 
 print("baseline: ", end="", flush=True)
-ok, msg = run_suite()
+ok, msg, output = run_suite()
 print(f"{'PASS' if ok else 'FAIL'}  {msg}")
 if not ok:
+    # The whole run stops here, so print what actually failed. Reporting only
+    # "baseline must pass" leaves no way to diagnose it from a CI log, where
+    # nobody can re-run the suite by hand.
+    print("\n--- baseline failure output ---")
+    print(output)
     sys.exit("baseline must pass before mutating")
 
 gaps = []
@@ -264,7 +276,7 @@ for name, relpath, original, reverted in MUTATIONS:
     path.write_text(text.replace(original, reverted, 1))
     _pending_restore = (path, text)
     try:
-        ok, msg = run_suite()
+        ok, msg, _ = run_suite()
     finally:
         path.write_text(text)
         _pending_restore = None
