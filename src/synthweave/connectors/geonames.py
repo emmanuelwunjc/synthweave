@@ -123,6 +123,19 @@ def _postal_data(cache_dir: str | Path | None) -> pd.DataFrame:
     return frame
 
 
+def _parse_postal_tsv(raw: str) -> list[list[str]]:
+    """Rows from GeoNames' tab-separated US.txt.
+
+    QUOTE_NONE is the point. `csv.reader`'s default dialect treats `"` as an
+    opening quote and keeps consuming lines until it finds a closing one,
+    which in a file that was never quoted silently merges later rows into the
+    current record and misaligns every column against `_COLUMNS`. Real
+    gazetteer place names do contain quote characters, so this corrupts data
+    rather than raising.
+    """
+    return list(csv.reader(io.StringIO(raw), delimiter="\t", quoting=csv.QUOTE_NONE))
+
+
 def _fetch_and_parse() -> pd.DataFrame:
     try:
         with urllib.request.urlopen(_URL, timeout=60) as response:
@@ -135,8 +148,8 @@ def _fetch_and_parse() -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         raw = archive.read(_MEMBER).decode("utf-8")
 
-    rows = list(csv.reader(io.StringIO(raw), delimiter="\t"))
-    frame = pd.DataFrame(rows, columns=_COLUMNS)
+
+    frame = pd.DataFrame(_parse_postal_tsv(raw), columns=_COLUMNS)
     if frame.empty:
         raise RuntimeError(f"GeoNames archive at {_URL} produced no rows")
     return frame

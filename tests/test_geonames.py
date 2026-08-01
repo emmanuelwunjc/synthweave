@@ -148,3 +148,23 @@ def test_independent_groups_do_not_always_coincide(real_postal_data):
     # would mean the two groups aren't actually independent.
     same_share = (result["home_city"] == result["work_city"]).mean()
     assert same_share < 0.05
+
+
+def test_a_quote_character_in_a_field_does_not_swallow_later_rows():
+    """US.txt is tab separated and was never quoted, so quotes are literal.
+
+    `csv.reader`'s default dialect treats `"` as an opening quote and keeps
+    consuming lines until it finds a closing one, merging later rows into
+    the current record and silently misaligning every column against
+    _COLUMNS. Real gazetteer place names do contain quote characters.
+    """
+    from synthweave.connectors import geonames
+
+    quoted = 'US\t10001\tThe "Big" Apple\tNY\tNY\tNew York\t061\t\t\t40.7\t-74.0\t4\n'
+    plain = "US\t10002\tPlainville\tNY\tNY\tNew York\t061\t\t\t40.8\t-74.1\t4\n"
+    rows = geonames._parse_postal_tsv(quoted + plain)
+
+    # Both rows survive as separate records, and the second is not absorbed.
+    assert len(rows) == 2
+    assert rows[0][2] == 'The "Big" Apple'
+    assert rows[1][1] == "10002"
