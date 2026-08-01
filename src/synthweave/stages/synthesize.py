@@ -26,6 +26,7 @@ tractable nor necessary.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -35,7 +36,7 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from .. import _hash
 from ..context import RunContext
 from ..provenance import as_tagged, modeled
-from ..registry import register, resolve
+from ..registry import register, registry, resolve
 from ..schema import Table
 from .base import buffer_to
 
@@ -123,20 +124,56 @@ class Prior:
         return frame
 
 
+class StructureConfigError(ValueError):
+    """A structure source was named that cannot be built from a name alone."""
+
+
+def _resolve_structure_name(name: str) -> Any:
+    """Resolve a registered structure name, or say why the name can't work.
+
+    Resolving a registered *class* means instantiating it with no arguments.
+    That works for `Declared` and for any third-party source that needs no
+    configuration, but `Empirical` needs a `frame` and `Prior` needs
+    `marginals`, and a bare string has no channel to carry either. Those
+    used to surface as `TypeError: Empirical.__init__() missing 1 required
+    positional argument: 'frame'`, which names the mechanism rather than the
+    fix. Check first and name the fix instead.
+    """
+    found = registry("structure").get(name)
+    if isinstance(found, type):
+        required = [
+            p.name
+            for p in inspect.signature(found).parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        ]
+        if required:
+            raise StructureConfigError(
+                f"structure={name!r} needs configuration a bare name cannot carry "
+                f"({', '.join(required)}). Pass a configured instance instead, "
+                f"e.g. structure={found.__name__}({required[0]}=...)."
+            )
+    return resolve("structure", name)
+
+
 def _coerce_structure(structure: Any) -> Any:
     """A structure source as given, or inferred from a plainer value.
 
-    `None` -> `Declared()`. A registered name (`"empirical"`, `"prior"`,
-    `"declared"`, or a third party's own registration) -> resolved through
-    the same `"structure"` registry `Empirical`/`Prior`/`Declared` register
-    themselves into. Real data already in hand -> `Empirical(structure)`.
-    Aggregate stats already in hand -> `Prior(marginals=structure)`. Anything
-    else (an already-built structure source instance) passes through as-is.
+    `None` -> `Declared()`. A registered name (`"declared"`, or a third
+    party's own registration that needs no configuration) -> resolved
+    through the same `"structure"` registry `Empirical`/`Prior`/`Declared`
+    register themselves into. `"empirical"`/`"prior"` are registered there
+    too but cannot be built from the name alone (they need a frame and
+    marginals respectively), so naming them raises `StructureConfigError`
+    pointing at the configured-instance form. Real data already in hand ->
+    `Empirical(structure)`. Aggregate stats already in hand ->
+    `Prior(marginals=structure)`. Anything else (an already-built structure
+    source instance) passes through as-is.
     """
     if structure is None:
         return Declared()
     if isinstance(structure, str):
-        return resolve("structure", structure)
+        return _resolve_structure_name(structure)
     if isinstance(structure, pd.DataFrame):
         return Empirical(structure)
     if isinstance(structure, Mapping):
@@ -164,8 +201,12 @@ class CARTSynthesizer:
             that will not parse raise, naming the column.
         structure: where to learn from. Defaults to `Declared`. Also accepts
             a `pd.DataFrame` directly (wrapped in `Empirical`), a `Mapping`
-            directly (wrapped in `Prior(marginals=...)`), or a name
-            registered under the `"structure"` kind.
+            directly (wrapped in `Prior(marginals=...)`), or the name of a
+            structure source registered under the `"structure"` kind that
+            needs no configuration (`"declared"`, or a third party's own).
+            `"empirical"`/`"prior"` cannot be named this way: they need a
+            frame and marginals respectively, which a bare string cannot
+            carry, so naming them raises `StructureConfigError`.
         fit_cap: maximum rows to fit on. Below this, every row is used.
         max_depth, min_samples_leaf: tree controls. Shallow trees generalize
             more and disclose less.

@@ -70,7 +70,13 @@ from .schema import Entity, Identifier, PerEntity, PerEvent, PerPeriod, Schema, 
 from .stages.generate import RuleGenerator
 from .stages.link import DeterministicLinker
 from .stages.noise import OCR, Missing, Noise, NoiseOp, Typo
-from .stages.synthesize import CARTSynthesizer, Declared, Empirical, Prior
+from .stages.synthesize import (
+    CARTSynthesizer,
+    Declared,
+    Empirical,
+    Prior,
+    StructureConfigError,
+)
 from .validation import SchemaError
 
 __version__ = "0.1.0"
@@ -88,7 +94,7 @@ __all__ = [
     "fidelity_report", "FidelityReport",
     # stages
     "RuleGenerator", "CARTSynthesizer", "Noise", "DeterministicLinker",
-    "Declared", "Empirical", "Prior",
+    "Declared", "Empirical", "Prior", "StructureConfigError",
     "NoiseOp", "Typo", "OCR", "Missing",
     # provenance
     "Tagged", "ProvenanceRecord", "user", "modeled", "cited",

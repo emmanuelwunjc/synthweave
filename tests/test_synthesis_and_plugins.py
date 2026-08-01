@@ -204,6 +204,22 @@ def test_structure_resolves_a_registered_name(people):
     assert set(result["x"].unique()) <= {1, 2, 3}
 
 
+def test_structure_by_name_needing_config_names_the_missing_argument():
+    """`structure="empirical"`/`"prior"` can never resolve by bare name.
+
+    `Empirical` requires `frame`, `Prior` requires `marginals`; a string has
+    no channel to carry either. Resolving the name used to hit `resolve()`'s
+    generic zero-arg instantiation and raise a bare `TypeError` ("missing 1
+    required positional argument: 'frame'") with no hint of what to do
+    instead. It should raise a `StructureConfigError` naming the source and
+    telling the caller to pass a configured instance.
+    """
+    with pytest.raises(sw.StructureConfigError, match="empirical"):
+        sw.CARTSynthesizer(["x"], structure="empirical")
+    with pytest.raises(sw.StructureConfigError, match="prior"):
+        sw.CARTSynthesizer(["x"], structure="prior")
+
+
 # --- the fit cap ------------------------------------------------------------
 
 

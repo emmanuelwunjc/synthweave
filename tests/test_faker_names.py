@@ -10,6 +10,8 @@ structure).
 
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import invariants
@@ -102,6 +104,22 @@ def test_ssn_area_within_valid_range(schema_with_pii):
     areas = result["ssn"].str.slice(0, 3).astype(int)
     assert areas.min() >= 1
     assert areas.max() <= 899
+
+
+def test_ssn_area_is_not_skewed_by_the_666_exclusion():
+    """`area == 666` must be resampled, not collapsed onto 667.
+
+    `np.where(area == 666, 667, area)` reassigns every 666 draw to a fixed
+    667 instead of drawing again, so 667 comes up roughly twice as often as
+    any other valid area. Over a large draw, 667's share should sit with its
+    neighbors, not roughly double them.
+    """
+    keys = np.arange(200_000).astype(str)
+    ssns = SSN().draw(keys, seed=1, salt="ssn")
+    areas = pd.Series([int(s[:3]) for s in ssns])
+    counts = areas.value_counts()
+    neighbor_avg = counts.reindex([663, 664, 665, 670, 671, 672]).mean()
+    assert counts[667] < neighbor_avg * 1.5
 
 
 def test_ssn_group_and_serial_are_never_zero(schema_with_pii):

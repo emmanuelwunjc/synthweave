@@ -93,8 +93,12 @@ class SSN:
     def draw(
         self, keys: np.ndarray, *, seed: int | str, salt: str, frame: pd.DataFrame | None = None
     ) -> np.ndarray:
-        area = _hash.integers(keys, seed, f"{salt}\x00area", 1, 900)
-        area = np.where(area == 666, 667, area)
+        # 898 valid areas (1-899 minus 666). Draw over that many values and
+        # shift past the gap, rather than remapping 666 onto a fixed
+        # replacement: remapping would give the replacement double the
+        # selection probability of every other area.
+        area = _hash.integers(keys, seed, f"{salt}\x00area", 1, 899)
+        area = np.where(area >= 666, area + 1, area)
         group = _hash.integers(keys, seed, f"{salt}\x00group", 1, 100)
         serial = _hash.integers(keys, seed, f"{salt}\x00serial", 1, 10000)
         return np.array(
