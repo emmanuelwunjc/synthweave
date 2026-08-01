@@ -50,6 +50,9 @@ The same person's `tax_id` is identical in every table carrying it, because
 identifiers are derived from (seed, entity, tag) rather than looked up.
 """
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _installed_version
+
 from ._hash import derive_id
 from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
@@ -79,7 +82,17 @@ from .stages.synthesize import (
 )
 from .validation import SchemaError
 
-__version__ = "0.1.0"
+# `pyproject.toml` is the single source of the version. Read it back from the
+# installed metadata rather than repeating it here: two copies drift the first
+# time one is bumped alone, and the installed package can then disagree with
+# its own metadata about what it is.
+try:
+    __version__ = _installed_version("synthweave")
+except PackageNotFoundError:
+    # Running from a source tree that was never installed, e.g. via
+    # PYTHONPATH=src. There is no metadata to read, and guessing a number
+    # here would recreate exactly the drift this avoids.
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     # schema

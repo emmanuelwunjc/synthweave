@@ -621,6 +621,15 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
 # --- the numeric heuristic --------------------------------------------------
 
 
+# This case is deliberately pathological: ~1,900 distinct strings fitted as
+# categories. Newer scikit-learn warns that a target with that many classes
+# per sample probably wants regression, which is a fair thing to say about
+# this input and exactly what the schema author asked for by leaving the
+# column as objects. The point of the test is that it fits rather than
+# crashing, so the warning is expected rather than a defect. Filtered here
+# and nowhere wider: the mutation harness runs with -W error::UserWarning on
+# purpose, and blanket-disabling that would hide real warnings elsewhere.
+@pytest.mark.filterwarnings("ignore::UserWarning")
 def test_a_numeric_column_with_a_few_sentinel_values_still_fits(people):
     """Survey data: an amount column with a handful of 'refused' answers.
 

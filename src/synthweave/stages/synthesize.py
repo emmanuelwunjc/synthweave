@@ -505,5 +505,3 @@ class _FittedCART:
             return pd.to_numeric(series, errors="coerce").fillna(0.0).to_numpy(dtype=float)
         mapping = self.codes[name]
         return series.map(lambda v: mapping.get(v, -1)).to_numpy(dtype=float)
-
-
