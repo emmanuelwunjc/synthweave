@@ -1,11 +1,15 @@
-# What this repo publishes is the package, its tests, and the worked
-# examples/guide the README points to. Everything else is real work that
-# stays on this machine: issue logs, specs, brainstorms, session handoffs,
-# the dev tooling, and the agent instructions.
+# What this repo publishes is the package, its tests, the worked
+# examples/guide the README points to, the issue log, and the dev tooling
+# that gates a fix (tools/mutation_check.py). Those last two are tracked
+# deliberately: an issue log and a coverage gate that live only on one
+# machine cannot be audited, cannot be restored, and cannot run in CI.
+# What still stays on this machine: specs, brainstorms, session handoffs,
+# and the agent instructions, which are working notes rather than a record
+# anyone else needs.
 # The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
 docs/*
 !docs/GUIDE.md
-tools/
+!docs/ISSUES.md
 demo/
 CLAUDE.md
 
