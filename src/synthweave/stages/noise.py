@@ -12,12 +12,20 @@ Which rows get hit is deterministic: a row is corrupted when
 unit(row key, seed, salt) < rate. So the same run always dirties the same
 rows, and the realized rate is reported so a user can confirm they got the
 mess they asked for.
+
+`rate` is a flat probability, or a function of the chunk returning one
+probability per row. The flat form can only express MCAR (missing completely
+at random); the function form is what expresses differential nonresponse,
+where the chance of a value going missing depends on the row it belongs to.
+Either way the draw itself is the same hash-derived comparison: the rate
+function chooses the threshold and never draws, which is what keeps a
+per-row rate as deterministic and chunk invariant as a flat one.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -43,11 +51,31 @@ _KEYBOARD = {
 
 
 class NoiseOp:
-    """Corrupts a subset of values. Subclasses implement `corrupt`."""
+    """Corrupts a subset of values. Subclasses implement `corrupt`.
 
-    def __init__(self, rate: float):
+    `rate` is either a flat probability applied to every row, or a vectorized
+    function of the chunk returning one probability per row. The function form
+    is what expresses differential nonresponse, e.g. missingness that differs
+    by subgroup rather than being uniform across the column:
+
+        Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))
+
+    It follows the same contract as `Sequential.fn`: handed the frame, returns
+    an array. A flat rate is range-checked here; a function's output can only
+    be checked once it has been called, which happens per chunk in `Noise.run`.
+
+    The function must be a pure function of each row's own values. It is
+    handed one chunk at a time, so anything derived from the chunk as a whole
+    (its length, a mean, a row's position in it) would make the output depend
+    on `chunk_size`, which is meant to be a memory knob and nothing else. The
+    frame it receives is the chunk as the noise stage holds it, which includes
+    `_sw_`-prefixed bookkeeping columns; those are internal and must not be
+    read.
+    """
+
+    def __init__(self, rate: float | Callable[[pd.DataFrame], Any]):
         self.rate = as_tagged(rate)
-        if not 0.0 <= self.rate.value <= 1.0:
+        if not callable(self.rate.value) and not 0.0 <= self.rate.value <= 1.0:
             raise ValueError(f"noise rate must be in [0, 1], got {self.rate.value}")
 
     @property
@@ -104,6 +132,24 @@ class OCR(NoiseOp):
         return out
 
 
+def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str) -> np.ndarray:
+    """Per-row rates from a rate function, range-checked.
+
+    A flat rate is checked in `NoiseOp.__init__`; a function's output only
+    exists once it has been called, so the same check has to happen here.
+    Out of range is silent otherwise: above 1 corrupts every row, below 0
+    corrupts none, and both look like a result rather than a config error.
+    """
+    rates = np.asarray(fn(chunk), dtype=float)
+    if not np.all((rates >= 0.0) & (rates <= 1.0)):
+        bad = rates[(rates < 0.0) | (rates > 1.0)]
+        raise ValueError(
+            f"noise rate function for {path} returned value(s) outside [0, 1], "
+            f"e.g. {sorted(set(bad.tolist()))[:3]}"
+        )
+    return rates
+
+
 @dataclass
 class _Applied:
     eligible: int = 0
@@ -144,6 +190,8 @@ class Noise:
                     rate = ctx.provenance.add(
                         f"{table.name}.noise.{column}.{op.name}.rate", op.rate
                     )
+                    if callable(rate):
+                        rate = _row_rates(rate, chunk, f"{table.name}.{column}.{op.name}")
                     hit = _hash.unit(keys, ctx.seed, salt) < rate
                     counter = tally.setdefault((column, op.name), _Applied())
                     counter.eligible += len(values)
