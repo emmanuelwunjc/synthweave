@@ -128,3 +128,29 @@ def test_shorthand_schema_matches_the_explicit_equivalent():
     ).run()["t"]
 
     assert explicit_result.equals(shorthand_result)
+
+
+def test_carry_star_resolves_per_schema_not_once_per_table():
+    """A `Table` reused across schemas must resolve `carry="*"` each time.
+
+    Resolution used to write the expanded tuple back into the shared `Table`,
+    so the second schema saw `carry` already resolved, skipped it, and
+    silently inherited the first schema's attribute set. No exception, no
+    warning: the second schema just quietly lost a column.
+    """
+    table = sw.Table("t", grain="person", carry="*")
+
+    first = sw.Entity("person", 10, attributes={"education": ["HS", "College"]})
+    schema_one = sw.Schema(entities=[first], tables=[table])
+
+    second = sw.Entity(
+        "person",
+        10,
+        attributes={"birth_year": sw.Integer(1990, 2000), "education": ["HS", "College"]},
+    )
+    schema_two = sw.Schema(entities=[second], tables=[table])
+
+    assert schema_one.table("t").carry == ("education",)
+    assert schema_two.table("t").carry == ("birth_year", "education")
+    # The shared object itself must be left alone, or the bug simply moves.
+    assert table.carry == "*"

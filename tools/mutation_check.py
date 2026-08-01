@@ -215,6 +215,19 @@ MUTATIONS = [
         "",
     ),
     (
+        "#11 carry=* resolves per schema, not once per table",
+        "src/synthweave/schema.py",
+        """        self.tables = tuple(
+            replace(table, carry=tuple(self.entity(table.entity).attributes.keys()))
+            if table.carry == "*"
+            else table
+            for table in self.tables
+        )""",
+        """        for table in self.tables:
+            if table.carry == "*":
+                table.carry = tuple(self.entity(table.entity).attributes.keys())""",
+    ),
+    (
         "#10 per-row rate range check",
         "src/synthweave/stages/noise.py",
         "    if not np.all((rates >= 0.0) & (rates <= 1.0)):",
