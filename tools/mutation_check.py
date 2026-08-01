@@ -206,6 +206,19 @@ MUTATIONS = [
         "        return _resolve_structure_name(structure)",
         '        return resolve("structure", structure)',
     ),
+    (
+        "#10 per-row rate function is actually applied",
+        "src/synthweave/stages/noise.py",
+        """                    if callable(rate):
+                        rate = _row_rates(rate, chunk, f"{table.name}.{column}.{op.name}")""",
+        "",
+    ),
+    (
+        "#10 per-row rate range check",
+        "src/synthweave/stages/noise.py",
+        "    if not np.all((rates >= 0.0) & (rates <= 1.0)):",
+        "    if False:",
+    ),
 ]
 
 
