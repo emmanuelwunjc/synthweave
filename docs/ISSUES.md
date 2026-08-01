@@ -870,6 +870,54 @@ with a clear message when it changes, and/or add an upper bound to the
 
 ---
 
+## I35. mutation_check.py crashed on a file absent from the current branch
+**Status:** fixed
+**Found:** running the harness on a branch off `main`, 2026-08-01.
+
+The run resolved each mutation's path and called `read_text()` on it
+unconditionally. An entry naming a file that does not exist on the checked-out
+branch therefore raised `FileNotFoundError` and killed the process, taking
+every later entry's check down with it. Hit because the I28 entry names
+`src/synthweave/connectors/faker_names.py`, which only exists on the unmerged
+PII branch.
+
+Worse than an ordinary crash: the harness exists to answer "is every fix
+covered," and dying partway through means most entries were never checked at
+all, while the output still looks like a run that happened.
+
+**Fix:** a missing file verifies exactly as much as a missing snippet does,
+so it now reports `STALE` and continues, the same as a snippet that no longer
+matches. `STALE` already fails the run, so nothing is silently excused.
+
+**Covered by:** not directly. The harness cannot mutate itself, so this is
+verified by the run completing on a branch where four entries name files or
+snippets that do not exist there.
+
+---
+
+## I36. PR #24 sat on GitHub without its own review fixes
+**Status:** fixed
+**Found:** branch and PR audit, 2026-08-01.
+
+The two blocking defects found reviewing PR #24 (I28, I31) were fixed and
+committed locally as `91dd085`, but never pushed. For some hours the open PR
+therefore contained the original bugs while the local branch contained the
+fixes, and merging the PR in that state would have merged the defects back in
+under a title claiming they were fixed.
+
+Not a code defect, but exactly the class of thing this log exists for: the
+review, the fix, and the artifact everyone else sees had drifted apart with
+nothing surfacing it.
+
+**Fix:** pushed. Verified `91dd085` now appears in `gh pr view 24 --json
+commits`. Worth a habit rather than a patch: after fixing review findings on a
+branch that already has an open PR, confirm the PR itself shows the fix commit
+before considering the review closed.
+
+**Covered by:** not applicable (process, not code).
+
+---
+
 ## Blocked while I15 is open
 
 `Prior` precedence between an explicit marginal and a joint that spans the same
