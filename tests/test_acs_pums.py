@@ -160,3 +160,22 @@ def test_a_header_only_response_is_a_failure_not_an_empty_frame():
     ):
         with pytest.raises(RuntimeError, match="no rows"):
             fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=None)
+
+
+def test_an_unknown_numeric_state_code_is_rejected():
+    """The numeric branch skipped the membership check the others get.
+
+    A name or abbreviation is validated against the known set, but any
+    digit string was zero-padded and passed straight through. '99' is not a
+    state, and sending it produced a confusing API-side failure instead of
+    a clear one naming the bad input.
+    """
+    with pytest.raises(ValueError, match="99"):
+        fetch_pums(["AGEP"], state="99", api_key="k", cache_dir=None)
+
+
+def test_a_valid_numeric_state_code_still_works():
+    """The check must not cost the ordinary case: 36 is New York."""
+    with patch("urllib.request.urlopen", return_value=_mock_response(json.dumps(PAYLOAD).encode())):
+        frame = fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=None)
+    assert len(frame) == 3
