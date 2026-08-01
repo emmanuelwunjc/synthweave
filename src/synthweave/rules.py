@@ -132,6 +132,15 @@ def coerce_rule(value: Any) -> Rule:
         )
     if isinstance(value, (list, tuple)):
         return Choice(list(value))
+    # A numpy scalar means the same thing a Python one does, and pulling a
+    # value out of a frame or array is the ordinary way to get one. Which of
+    # them worked used to be an accident of numpy's type hierarchy: np.float64
+    # subclasses float and so passed the branch below, np.int64 does not
+    # subclass int and fell through to an error suggesting sw.Integer(low,
+    # high), which is not the fix for a single fixed value. Unwrapped to a
+    # plain Python scalar so the column does not inherit a surprising dtype.
+    if isinstance(value, np.generic):
+        return Constant(value.item())
     if isinstance(value, (int, float, str, bool)):
         return Constant(value)
     raise TypeError(
