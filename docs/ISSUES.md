@@ -918,6 +918,34 @@ before considering the review closed.
 
 ---
 
+## I37. carry="*" mutated the shared Table, silently dropping attributes
+**Status:** fixed
+**Tracked:** [#11](https://github.com/emmanuelwunjc/synthweave/issues/11)
+**Found:** bug hunt, 2026-07-31. Fixed 2026-08-01 as the first item of the
+v0.3 "nothing silently wrong" release.
+
+`Schema.__post_init__` resolved `carry="*"` by writing the expanded tuple
+back into the `Table` instance it was handed. A `Table` built once and
+reused across two `Schema`s therefore resolved only the first time: the
+second schema saw `carry` already a tuple, the `== "*"` check was false, and
+resolution was skipped entirely. The second schema silently inherited the
+first schema's attribute set.
+
+The severity is in the silence. Reusing a `Table` across schemas is normal
+in a loop or a test fixture, and the second schema simply lost a column with
+no exception and no warning.
+
+**Fix:** resolve into a copy via `dataclasses.replace` and rebind
+`self.tables`, leaving the caller's object exactly as they built it. The
+regression test also asserts `table.carry` is still `"*"` afterwards, so the
+bug cannot reappear by moving the mutation somewhere else.
+
+**Covered by:** `test_carry_star_resolves_per_schema_not_once_per_table` in
+`tests/test_schema_shorthands.py`. Registered in `tools/mutation_check.py`
+as `#11` and confirmed CAUGHT.
+
+---
+
 ## Blocked while I15 is open
 
 `Prior` precedence between an explicit marginal and a joint that spans the same

@@ -17,7 +17,7 @@ million people costs nothing until rows are actually produced.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from .provenance import Tagged, as_tagged
@@ -225,9 +225,18 @@ class Schema:
     def __post_init__(self):
         # carry="*" needs the entity to resolve against, which only Schema
         # can see; Table alone only knows its entity by name.
-        for table in self.tables:
-            if table.carry == "*":
-                table.carry = tuple(self.entity(table.entity).attributes.keys())
+        #
+        # Resolve into a copy. Writing the expanded tuple back into the shared
+        # `Table` meant a table reused across two schemas resolved once and
+        # then silently kept the first schema's attributes, because `carry`
+        # was no longer `"*"` the second time and the check skipped it. The
+        # caller's object is left exactly as they built it.
+        self.tables = tuple(
+            replace(table, carry=tuple(self.entity(table.entity).attributes.keys()))
+            if table.carry == "*"
+            else table
+            for table in self.tables
+        )
 
     def entity(self, name: str) -> Entity:
         for e in self.entities:
