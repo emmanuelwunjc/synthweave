@@ -177,3 +177,17 @@ def test_coerce_rule_still_accepts_a_plain_tuple_of_choices():
     rule = sw.rules.coerce_rule(("HS", "College"))
     assert isinstance(rule, sw.Choice)
     assert list(rule.values) == ["HS", "College"]
+
+
+def test_carry_star_with_an_unknown_entity_raises_schema_error_naming_the_table():
+    """A typo'd entity must fail the same way whether or not carry="*" is used.
+
+    `validate_schema` wraps the identical lookup to raise a contextual
+    SchemaError naming the table. The `carry="*"` path called `self.entity`
+    unwrapped, so the same typo surfaced as a bare KeyError at construction
+    with no table context, purely because of which shorthand was used.
+    """
+    person = sw.Entity("person", 10, attributes={"education": ["HS", "College"]})
+    table = sw.Table("t", grain="persn", carry="*")
+    with pytest.raises(sw.SchemaError, match="'t'"):
+        sw.Schema(entities=[person], tables=[table])
