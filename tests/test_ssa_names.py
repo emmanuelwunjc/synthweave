@@ -138,3 +138,21 @@ def test_name_pool_shifts_by_era(ssa_zip_path):
     top_1900 = set(result[result["birth_year"] == 1900]["first_name"].value_counts().head(5).index)
     top_2020 = set(result[result["birth_year"] == 2020]["first_name"].value_counts().head(5).index)
     assert len(top_1900 & top_2020) < 3
+
+
+def test_a_nan_birth_year_is_rejected_rather_than_left_as_none(tmp_path):
+    """NaN slips every comparison, so the row was silently never written.
+
+    The range guard uses `years < min` and `years > max`, both False for
+    NaN, so a NaN year passed validation. The draw loop then groups with
+    `years == year`, also False for NaN, so the row matched no group and its
+    slot in the output array was never assigned, surfacing as an
+    uninitialised None rather than an error.
+    """
+    zip_path = tmp_path / "names.zip"
+    zip_path.write_bytes(_fake_zip_bytes())
+    rule = SSAFirstName(on="birth_year", source=zip_path, cache_dir=None)
+    person = sw.Entity("person", 10, attributes={"birth_year": sw.Constant(float("nan"))})
+    table = sw.Table("t", grain="person", carry=["birth_year"], columns={"first_name": rule})
+    with pytest.raises(ValueError, match="(?i)nan|missing"):
+        sw.Pipeline(sw.Schema([person], [table])).run()

@@ -94,6 +94,19 @@ class SSAFirstName:
             )
 
         years = frame[self.on].to_numpy()
+        # Check for missing years before the range check, not after: NaN is
+        # False for both `< min` and `> max`, so it passes the range guard,
+        # and then False for `== year` in the grouping loop below, so the row
+        # matches no group and its slot in the output array is never written.
+        # The result was an uninitialised None in the output rather than any
+        # error, with nothing pointing at the missing input that caused it.
+        missing = pd.isna(years)
+        if missing.any():
+            raise ValueError(
+                f"SSAFirstName: {self.on!r} has {int(missing.sum())} missing value(s), which "
+                "cannot select a birth-year cohort. Fill or drop them before synthesizing, "
+                "e.g. with a Conditional rule or by filtering the frame."
+            )
         bad = years[(years < self._min_year) | (years > self._max_year)]
         if len(bad):
             raise ValueError(
