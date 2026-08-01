@@ -235,6 +235,14 @@ gaps = []
 stale = []
 for name, relpath, original, reverted in MUTATIONS:
     path = ROOT / relpath
+    if not path.exists():
+        # A missing file verifies exactly as much as a missing snippet does:
+        # nothing. It used to crash the whole run instead, which meant one
+        # entry naming a file absent on the current branch took down every
+        # later entry's check too.
+        print(f"  STALE  {name}: {relpath} does not exist, so nothing was verified")
+        stale.append(name)
+        continue
     text = path.read_text()
     if original not in text:
         print(f"  STALE  {name}: snippet not found, so nothing was verified")
