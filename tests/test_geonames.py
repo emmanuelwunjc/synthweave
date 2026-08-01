@@ -12,6 +12,8 @@ import io
 import zipfile
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import invariants
@@ -173,3 +175,58 @@ def test_a_leading_quote_does_not_swallow_the_following_row():
     assert rows[0][1] == "10001"
     assert rows[1][1] == "10002"
     assert rows[1][2] == "Plainville"
+
+
+# --- offline: the group-consistency property --------------------------------
+
+
+def _offline_address(tmp_path, field, group="address"):
+    """A USAddress over a tiny synthetic gazetteer, cache pre-seeded."""
+    from synthweave.connectors import geonames
+
+    cache = tmp_path / "geonames_cache"
+    cache.mkdir(exist_ok=True)
+    pd.DataFrame(
+        {
+            "country_code": ["US", "US", "US"],
+            "postal_code": ["10001", "94103", "60601"],
+            "city": ["New York", "San Francisco", "Chicago"],
+            "state": ["New York", "California", "Illinois"],
+            "state_abbr": ["NY", "CA", "IL"],
+            "county": ["New York", "San Francisco", "Cook"],
+            "county_code": ["061", "075", "031"],
+            "admin_name3": ["", "", ""],
+            "admin_code3": ["", "", ""],
+            "latitude": ["40.7", "37.8", "41.9"],
+            "longitude": ["-74.0", "-122.4", "-87.6"],
+            "accuracy": ["4", "4", "4"],
+        }
+    ).to_csv(cache / "us_postal.csv", index=False)
+    geonames._cache.clear()
+    return geonames.USAddress(field, group=group, cache_dir=cache)
+
+
+def test_fields_in_one_group_come_from_the_same_real_row(tmp_path):
+    """city/state/zip must describe one real place, not three.
+
+    This is the whole reason the connector exists over Faker, and it was
+    only ever checked by a network-gated test. The synthetic gazetteer's
+    rows are mutually exclusive, so any mismatch is unambiguous.
+    """
+    keys = np.array([f"k{i}" for i in range(300)], dtype=object)
+    city = _offline_address(tmp_path, "city").draw(keys, seed=2, salt="city")
+    state = _offline_address(tmp_path, "state_abbr").draw(keys, seed=2, salt="state_abbr")
+    zips = _offline_address(tmp_path, "postal_code").draw(keys, seed=2, salt="postal_code")
+
+    real = {("New York", "NY", "10001"), ("San Francisco", "CA", "94103"), ("Chicago", "IL", "60601")}
+    assert set(zip(city, state, zips)) <= real
+    # And it is genuinely drawing more than one row, or the check is vacuous.
+    assert len(set(city)) > 1
+
+
+def test_a_separate_group_is_independent_of_the_first(tmp_path):
+    """A work address must not always coincide with the home address."""
+    keys = np.array([f"k{i}" for i in range(300)], dtype=object)
+    home = _offline_address(tmp_path, "city").draw(keys, seed=2, salt="city")
+    work = _offline_address(tmp_path, "city", group="work").draw(keys, seed=2, salt="city")
+    assert not np.array_equal(home, work)

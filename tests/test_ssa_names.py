@@ -14,6 +14,8 @@ import os
 import zipfile
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import invariants
@@ -190,3 +192,46 @@ def test_two_sources_do_not_share_one_cache_file(tmp_path):
 
     assert set(frame_one["name"]) == {"Mary", "John", "William", "Noah", "Olivia", "Emma"}
     assert set(frame_two["name"]) == {"Zelda"}
+
+
+# --- offline: the pooling math itself ---------------------------------------
+# Expected values are read off FAKE_YEARS by hand, not recomputed with the
+# groupby under test.
+
+
+def _offline_rule(tmp_path, **kwargs):
+    zip_path = tmp_path / "names.zip"
+    zip_path.write_bytes(_fake_zip_bytes())
+    return SSAFirstName(source=zip_path, cache_dir=None, **kwargs)
+
+
+def test_pooling_a_year_sums_both_sexes(tmp_path):
+    """Without sex_on, a year's pool is every name born that year.
+
+    FAKE_YEARS 1900 is Mary F 400, John M 350, William M 200.
+    """
+    rule = _offline_rule(tmp_path)
+    names, weights = rule._pool(1900, None)
+    assert dict(zip(names, weights)) == {"Mary": 400.0, "John": 350.0, "William": 200.0}
+
+
+def test_pooling_a_year_and_sex_narrows_to_that_sex(tmp_path):
+    """With sex_on, the pool excludes the other sex entirely."""
+    rule = _offline_rule(tmp_path, sex_on="sex")
+    names, weights = rule._pool(1900, "M")
+    assert dict(zip(names, weights)) == {"John": 350.0, "William": 200.0}
+
+
+def test_the_drawn_name_belongs_to_the_row_s_own_birth_year(tmp_path):
+    """A 1900 row can never receive a name only present in 2020.
+
+    The cohorts in FAKE_YEARS are disjoint, so a leaked name across years
+    would be unambiguous rather than a matter of proportion.
+    """
+    rule = _offline_rule(tmp_path)
+    frame = pd.DataFrame({"birth_year": [1900] * 50 + [2020] * 50})
+    keys = np.array([f"k{i}" for i in range(100)], dtype=object)
+
+    drawn = rule.draw(keys, seed=11, salt="first_name", frame=frame)
+    assert set(drawn[:50]) <= {"Mary", "John", "William"}
+    assert set(drawn[50:]) <= {"Noah", "Olivia", "Emma"}
