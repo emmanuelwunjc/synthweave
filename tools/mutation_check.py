@@ -239,6 +239,12 @@ MUTATIONS = [
         '    cache_path = None if cache_dir is None else Path(cache_dir) / "ssa_names.csv"',
     ),
     (
+        "#13 namedtuple refused rather than flattened into a Choice",
+        "src/synthweave/rules.py",
+        '    if isinstance(value, tuple) and hasattr(value, "_fields"):',
+        "    if False:",
+    ),
+    (
         "#11 carry=* resolves per schema, not once per table",
         "src/synthweave/schema.py",
         """        self.tables = tuple(
