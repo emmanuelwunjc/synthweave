@@ -6,9 +6,12 @@ exact same result as writing the equivalent explicit form out by hand.
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import pytest
 
 import synthweave as sw
+import synthweave.rules
 from synthweave.rules import coerce_rule
 
 
@@ -154,3 +157,23 @@ def test_carry_star_resolves_per_schema_not_once_per_table():
     assert schema_two.table("t").carry == ("birth_year", "education")
     # The shared object itself must be left alone, or the bug simply moves.
     assert table.carry == "*"
+
+
+def test_coerce_rule_refuses_a_namedtuple_instead_of_flattening_it():
+    """A namedtuple is a tuple, but it is not a list of alternatives.
+
+    The plain-tuple branch matched it and produced an equal-weight `Choice`
+    over its field values, so `Point(1, 2)` silently became "pick 1 or 2".
+    That is the same silent-wrong-shape risk `coerce_rule` already refuses
+    to take with a bare 2-tuple, reached through a different door.
+    """
+    Point = namedtuple("Point", ["x", "y"])
+    with pytest.raises(TypeError, match="Point"):
+        sw.rules.coerce_rule(Point(1, 2))
+
+
+def test_coerce_rule_still_accepts_a_plain_tuple_of_choices():
+    """The fix must not cost the ordinary case it was built for."""
+    rule = sw.rules.coerce_rule(("HS", "College"))
+    assert isinstance(rule, sw.Choice)
+    assert list(rule.values) == ["HS", "College"]

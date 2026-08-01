@@ -215,6 +215,12 @@ MUTATIONS = [
         "",
     ),
     (
+        "#13 namedtuple refused rather than flattened into a Choice",
+        "src/synthweave/rules.py",
+        '    if isinstance(value, tuple) and hasattr(value, "_fields"):',
+        "    if False:",
+    ),
+    (
         "#11 carry=* resolves per schema, not once per table",
         "src/synthweave/schema.py",
         """        self.tables = tuple(
