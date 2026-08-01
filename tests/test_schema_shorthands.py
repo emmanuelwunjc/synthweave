@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import namedtuple
 
+import numpy as np
 import pytest
 
 import synthweave as sw
@@ -177,3 +178,34 @@ def test_coerce_rule_still_accepts_a_plain_tuple_of_choices():
     rule = sw.rules.coerce_rule(("HS", "College"))
     assert isinstance(rule, sw.Choice)
     assert list(rule.values) == ["HS", "College"]
+
+
+def test_carry_star_with_an_unknown_entity_raises_schema_error_naming_the_table():
+    """A typo'd entity must fail the same way whether or not carry="*" is used.
+
+    `validate_schema` wraps the identical lookup to raise a contextual
+    SchemaError naming the table. The `carry="*"` path called `self.entity`
+    unwrapped, so the same typo surfaced as a bare KeyError at construction
+    with no table context, purely because of which shorthand was used.
+    """
+    person = sw.Entity("person", 10, attributes={"education": ["HS", "College"]})
+    table = sw.Table("t", grain="persn", carry="*")
+    with pytest.raises(sw.SchemaError, match="'t'"):
+        sw.Schema(entities=[person], tables=[table])
+
+
+def test_numpy_scalars_coerce_symmetrically():
+    """np.int64 must behave like np.float64, not fall through to an error.
+
+    The asymmetry was an accident of numpy's type hierarchy: np.float64
+    subclasses Python float and so passed the scalar branch, while np.int64
+    does not subclass int and fell through to a TypeError whose suggested
+    fix (sw.Integer(low, high)) does not apply to a single fixed value
+    pulled out of a frame.
+    """
+    for value in (np.int64(7), np.float64(3.5), np.bool_(True)):
+        rule = sw.rules.coerce_rule(value)
+        assert isinstance(rule, sw.Constant), f"{type(value).__name__} did not coerce"
+        # The stored value is a plain Python scalar, not a numpy one, so a
+        # frame built from it does not inherit a surprising dtype.
+        assert type(rule.value).__module__ == "builtins"

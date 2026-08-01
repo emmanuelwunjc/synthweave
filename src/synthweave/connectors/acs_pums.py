@@ -76,7 +76,18 @@ def _resolve_state(state: str) -> str:
     caller never has to look up a FIPS table by hand.
     """
     if state.isdigit():
-        return state.zfill(2)
+        # Validated like every other form. This branch used to zero-pad and
+        # return without a membership check, so a code that is not a state
+        # reached the API and came back as a confusing transport-level
+        # failure naming a URL rather than the input that was wrong.
+        code = state.zfill(2)
+        if code not in set(_STATE_FIPS.values()):
+            raise ValueError(
+                f"{state!r} is not a recognized state FIPS code. Codes are 2 digits and "
+                "not contiguous; a USPS abbreviation or full name works too, e.g. "
+                '"NY" or "New York".'
+            )
+        return code
     abbrev = _STATE_NAMES.get(state.strip().upper(), state.strip().upper())
     if abbrev not in _STATE_FIPS:
         raise ValueError(

@@ -177,6 +177,25 @@ def _coerce_structure(structure: Any) -> Any:
     if isinstance(structure, pd.DataFrame):
         return Empirical(structure)
     if isinstance(structure, Mapping):
+        # Check the shape before committing to the guess. Prior only asserts
+        # the dict is non-empty, so a Mapping that is not marginals (e.g.
+        # {"table": some_frame}) was accepted here and failed much later
+        # inside Prior.training_frame, with an error that never mentioned
+        # the coercion that had guessed wrong.
+        bad = [
+            key
+            for key, dist in structure.items()
+            if not isinstance(dist, Mapping)
+            or not all(isinstance(weight, (int, float)) for weight in dist.values())
+        ]
+        if bad:
+            raise TypeError(
+                f"structure= was given a dict, which is shorthand for Prior marginals shaped "
+                f"{{column: {{value: probability}}}}, but {bad[:3]} "
+                f"{'does' if len(bad) == 1 else 'do'} not have that shape. "
+                "Pass real data as a DataFrame, or build the source explicitly with "
+                "sw.Empirical(frame) or sw.Prior(marginals=..., joints=...)."
+            )
         return Prior(marginals=structure)
     return structure
 

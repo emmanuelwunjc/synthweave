@@ -232,11 +232,25 @@ class Schema:
         # was no longer `"*"` the second time and the check skipped it. The
         # caller's object is left exactly as they built it.
         self.tables = tuple(
-            replace(table, carry=tuple(self.entity(table.entity).attributes.keys()))
-            if table.carry == "*"
-            else table
+            replace(table, carry=self._every_attribute_of(table)) if table.carry == "*" else table
             for table in self.tables
         )
+
+    def _every_attribute_of(self, table: Table) -> tuple[str, ...]:
+        """Attribute names of a table's entity, for `carry="*"`.
+
+        The lookup is wrapped because `validate_schema` wraps the identical
+        one, and an unwrapped call meant a typo'd entity name failed
+        differently depending on whether `carry="*"` happened to be used: a
+        bare KeyError at construction with no table named, instead of the
+        SchemaError naming the table that every other path produces.
+        """
+        from .validation import SchemaError
+
+        try:
+            return tuple(self.entity(table.entity).attributes.keys())
+        except KeyError as e:
+            raise SchemaError(f"table {table.name!r}: {e.args[0]}") from e
 
     def entity(self, name: str) -> Entity:
         for e in self.entities:

@@ -245,17 +245,39 @@ MUTATIONS = [
         "    if False:",
     ),
     (
+        "#12 carry=* unknown entity raises SchemaError with table context",
+        "src/synthweave/schema.py",
+        '            raise SchemaError(f"table {table.name!r}: {e.args[0]}") from e',
+        "            raise",
+    ),
+    (
+        "#14 numpy scalars coerce symmetrically",
+        "src/synthweave/rules.py",
+        "    if isinstance(value, np.generic):\n        return Constant(value.item())",
+        "    if False:\n        return Constant(value.item())",
+    ),
+    (
+        "#20 unknown numeric state FIPS code rejected",
+        "src/synthweave/connectors/acs_pums.py",
+        "        if code not in set(_STATE_FIPS.values()):",
+        "        if False:",
+    ),
+    (
+        "#15 malformed structure dict rejected at the coercion",
+        "src/synthweave/stages/synthesize.py",
+        "        if bad:",
+        "        if False:",
+    ),
+    (
         "#11 carry=* resolves per schema, not once per table",
         "src/synthweave/schema.py",
         """        self.tables = tuple(
-            replace(table, carry=tuple(self.entity(table.entity).attributes.keys()))
-            if table.carry == "*"
-            else table
+            replace(table, carry=self._every_attribute_of(table)) if table.carry == "*" else table
             for table in self.tables
         )""",
         """        for table in self.tables:
             if table.carry == "*":
-                table.carry = tuple(self.entity(table.entity).attributes.keys())""",
+                table.carry = self._every_attribute_of(table)""",
     ),
     (
         "#10 per-row rate range check",

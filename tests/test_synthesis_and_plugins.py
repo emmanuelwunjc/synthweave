@@ -859,3 +859,23 @@ def test_a_widening_type_shift_between_chunks_is_absorbed(tmp_path):
 
     assert len(written) == 400
     assert written["half"].dtype == "float64"
+
+
+def test_a_malformed_structure_dict_is_rejected_at_the_coercion(people):
+    """A bare Mapping is guessed to be Prior marginals; say so when it is not.
+
+    `structure={"t": some_dataframe}` was wrapped as
+    `Prior(marginals=...)` unconditionally, since Prior only checks the dict
+    is non-empty. The failure surfaced much later inside
+    `Prior.training_frame`, as an unrelated error with nothing pointing at
+    the coercion that guessed wrong.
+    """
+    not_marginals = {"t": pd.DataFrame({"a": [1, 2, 3]})}
+    with pytest.raises(TypeError, match="(?i)marginal"):
+        sw.CARTSynthesizer(["x"], structure=not_marginals)
+
+
+def test_a_well_formed_marginals_dict_still_coerces(people):
+    """The check must not cost the shorthand it guards."""
+    synth = sw.CARTSynthesizer(["tenure"], structure={"tenure": {"own": 0.65, "rent": 0.35}})
+    assert isinstance(synth.structure, sw.Prior)
