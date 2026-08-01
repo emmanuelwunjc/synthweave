@@ -215,6 +215,30 @@ MUTATIONS = [
         "",
     ),
     (
+        "#17 header-only ACS response rejected",
+        "src/synthweave/connectors/acs_pums.py",
+        "    if not payload or len(payload) <= 1:",
+        "    if not payload or len(payload) < 1:",
+    ),
+    (
+        "#19 GeoNames TSV parsed without CSV quote handling",
+        "src/synthweave/connectors/geonames.py",
+        '    return list(csv.reader(io.StringIO(raw), delimiter="\\t", quoting=csv.QUOTE_NONE))',
+        '    return list(csv.reader(io.StringIO(raw), delimiter="\\t"))',
+    ),
+    (
+        "#18 missing birth year rejected before the range guard",
+        "src/synthweave/connectors/ssa_names.py",
+        "        missing = pd.isna(years)\n        if missing.any():",
+        "        missing = pd.isna(years)\n        if False:",
+    ),
+    (
+        "#16 SSA cache filename distinguishes the source",
+        "src/synthweave/connectors/ssa_names.py",
+        "    cache_path = None if cache_dir is None else Path(cache_dir) / _cache_filename(source)",
+        '    cache_path = None if cache_dir is None else Path(cache_dir) / "ssa_names.csv"',
+    ),
+    (
         "#13 namedtuple refused rather than flattened into a Choice",
         "src/synthweave/rules.py",
         '    if isinstance(value, tuple) and hasattr(value, "_fields"):',

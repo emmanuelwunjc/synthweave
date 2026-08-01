@@ -148,3 +148,28 @@ def test_independent_groups_do_not_always_coincide(real_postal_data):
     # would mean the two groups aren't actually independent.
     same_share = (result["home_city"] == result["work_city"]).mean()
     assert same_share < 0.05
+
+
+def test_a_leading_quote_does_not_swallow_the_following_row():
+    """US.txt is tab separated and was never quoted, so quotes are literal.
+
+    `csv.reader`'s default dialect treats a `"` at the *start* of a field as
+    an opening quote and keeps consuming lines until it finds a closing one.
+    A field beginning with a quote therefore absorbs the next row into
+    itself: two records become one, every column of it misaligned against
+    _COLUMNS, and nothing raises.
+
+    The quote must lead the field to trigger this. Mid-field quotes are
+    literal even under the default dialect, which is why an earlier version
+    of this test passed against the bug.
+    """
+    from synthweave.connectors import geonames
+
+    leading_quote = 'US\t10001\t"Big Apple\tNY\tNY\tNew York\t061\t\t\t40.7\t-74.0\t4\n'
+    following = "US\t10002\tPlainville\tNY\tNY\tNew York\t061\t\t\t40.8\t-74.1\t4\n"
+    rows = geonames._parse_postal_tsv(leading_quote + following)
+
+    assert len(rows) == 2, "the second row was absorbed into the first"
+    assert rows[0][1] == "10001"
+    assert rows[1][1] == "10002"
+    assert rows[1][2] == "Plainville"

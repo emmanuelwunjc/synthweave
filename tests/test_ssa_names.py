@@ -18,12 +18,20 @@ import pytest
 
 import invariants
 import synthweave as sw
-from synthweave.connectors.ssa_names import SSAFirstName, _fetch, _parse
+from synthweave.connectors.ssa_names import SSAFirstName, _cache, _fetch, _parse, _ssa_data
 
 FAKE_YEARS = {
     1900: ["Mary,F,400", "John,M,350", "William,M,200"],
     2020: ["Noah,M,300", "Olivia,F,280", "Emma,F,260"],
 }
+
+
+def _zip_bytes_for(years: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for year, lines in years.items():
+            archive.writestr(f"yob{year}.txt", "\n".join(lines) + "\n")
+    return buf.getvalue()
 
 
 def _fake_zip_bytes() -> bytes:
@@ -138,3 +146,47 @@ def test_name_pool_shifts_by_era(ssa_zip_path):
     top_1900 = set(result[result["birth_year"] == 1900]["first_name"].value_counts().head(5).index)
     top_2020 = set(result[result["birth_year"] == 2020]["first_name"].value_counts().head(5).index)
     assert len(top_1900 & top_2020) < 3
+
+
+def test_a_nan_birth_year_is_rejected_rather_than_left_as_none(tmp_path):
+    """NaN slips every comparison, so the row was silently never written.
+
+    The range guard uses `years < min` and `years > max`, both False for
+    NaN, so a NaN year passed validation. The draw loop then groups with
+    `years == year`, also False for NaN, so the row matched no group and its
+    slot in the output array was never assigned, surfacing as an
+    uninitialised None rather than an error.
+    """
+    zip_path = tmp_path / "names.zip"
+    zip_path.write_bytes(_fake_zip_bytes())
+    rule = SSAFirstName(on="birth_year", source=zip_path, cache_dir=None)
+    person = sw.Entity("person", 10, attributes={"birth_year": sw.Constant(float("nan"))})
+    table = sw.Table("t", grain="person", carry=["birth_year"], columns={"first_name": rule})
+    with pytest.raises(ValueError, match="(?i)nan|missing"):
+        sw.Pipeline(sw.Schema([person], [table])).run()
+
+
+def test_two_sources_do_not_share_one_cache_file(tmp_path):
+    """The on-disk cache name must distinguish which source produced it.
+
+    The filename was always `ssa_names.csv`, with `source` present only in
+    the in-memory memo key. In a fresh process, a second `SSAFirstName`
+    pointing at a different local zip found the first source's file already
+    on disk and silently returned its data. The second source was never
+    read and nothing was raised.
+    """
+    other_years = {1900: ["Zelda,F,999"]}
+    first = tmp_path / "first.zip"
+    first.write_bytes(_fake_zip_bytes())
+    second = tmp_path / "second.zip"
+    second.write_bytes(_zip_bytes_for(other_years))
+
+    cache = tmp_path / "cache"
+    # Bypass the in-memory memo, which already keys on source, so this
+    # exercises the on-disk path the way a fresh process would.
+    frame_one = _ssa_data(first, cache)
+    _cache.clear()
+    frame_two = _ssa_data(second, cache)
+
+    assert set(frame_one["name"]) == {"Mary", "John", "William", "Noah", "Olivia", "Emma"}
+    assert set(frame_two["name"]) == {"Zelda"}

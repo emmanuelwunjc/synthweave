@@ -142,3 +142,21 @@ def test_malformed_json_raises():
     with patch("urllib.request.urlopen", return_value=_mock_response(b"not json")):
         with pytest.raises(RuntimeError, match="not valid JSON"):
             fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=None)
+
+
+def test_a_header_only_response_is_a_failure_not_an_empty_frame():
+    """Zero data rows means the request matched nothing, not that it worked.
+
+    The guard was `len(payload) < 1`, so a header-only response (length 1)
+    passed and produced a zero-row frame that looked like a successful
+    fetch. The Census API returns exactly that shape for a filter matching
+    nothing, or a subtly wrong state/year/survey combination. Handing the
+    empty frame onward failed much later in `Empirical`, far from the
+    request that actually went wrong.
+    """
+    header_only = [["AGEP", "PINCP", "ST"]]
+    with patch(
+        "urllib.request.urlopen", return_value=_mock_response(json.dumps(header_only).encode())
+    ):
+        with pytest.raises(RuntimeError, match="no rows"):
+            fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=None)
