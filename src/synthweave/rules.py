@@ -119,6 +119,17 @@ def coerce_rule(value: Any) -> Rule:
     """
     if isinstance(value, Rule):
         return value
+    # A namedtuple is a tuple, but it is a record, not a list of alternatives.
+    # The plain-tuple branch below would turn Point(1, 2) into "pick 1 or 2
+    # with equal odds", which nobody handing over a structured value means.
+    # `_fields` is the standard way to tell one from a plain tuple.
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        raise TypeError(
+            f"{type(value).__name__}{tuple(value)!r} is a namedtuple, which names fields "
+            "rather than listing alternatives, so there is no one obvious rule it means. "
+            "Say it explicitly: sw.Choice([...]) to pick between its values, or a rule "
+            "per field if the fields are separate columns."
+        )
     if isinstance(value, (list, tuple)):
         return Choice(list(value))
     if isinstance(value, (int, float, str, bool)):
