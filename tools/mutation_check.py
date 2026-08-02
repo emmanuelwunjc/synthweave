@@ -328,6 +328,12 @@ MUTATIONS = [
         "        if not np.all(np.isfinite(w)):",
         "        if False:",
     ),
+    (
+        "#43 CSV chunk writer guards column order/shape between chunks",
+        "src/synthweave/io.py",
+        "            elif list(chunk.columns) != self._csv_columns:",
+        "            elif False:",
+    ),
 ]
 
 
