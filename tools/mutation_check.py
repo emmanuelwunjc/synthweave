@@ -322,6 +322,12 @@ MUTATIONS = [
         "    if not np.all((rates >= 0.0) & (rates <= 1.0)):",
         "    if False:",
     ),
+    (
+        "#41 NaN/inf Choice weight rejected instead of collapsing the column",
+        "src/synthweave/_hash.py",
+        "        if not np.all(np.isfinite(w)):",
+        "        if False:",
+    ),
 ]
 
 
