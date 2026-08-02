@@ -387,6 +387,24 @@ sw.Noise({
 ```
 
 - `sw.Missing(rate)` — blank out `rate` share of values.
+
+`rate` is either a flat probability, or a **function of the chunk returning
+one probability per row**. The flat form can only express MCAR (missing
+completely at random). The function form expresses *differential*
+nonresponse, where the chance of a value going missing depends on the row it
+belongs to:
+
+```python
+# 30% missing for HS, 5% for College.
+sw.Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))
+```
+
+It is vectorized, the same contract `sw.Sequential` uses: handed the frame,
+returns an array. The corruption decision still routes through
+`unit(key, seed, salt) < rate`, so the function only chooses the threshold
+and never draws — which is what keeps a per-row rate exactly as
+deterministic and chunk invariant as a flat one. A rate outside `[0, 1]`
+raises, naming the column and op.
 - `sw.Typo(rate)` — one nearby-key typo in `rate` share of values.
 - `sw.OCR(rate)` — one visually-confusable-character swap in `rate` share of values.
 
@@ -649,5 +667,3 @@ column is passed through exactly as drawn.
   explicit form throughout.
 - `examples/three_layers_data_availability.py` — Steps 5, 6, and 7 above,
   as one runnable script.
-- `docs/specs/synthweave-v0.1.md` — the original requirements and design
-  reasoning, for anyone who wants the "why," not just the "how."

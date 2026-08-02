@@ -21,7 +21,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: PYTHONPATH=src python3 -m pytest tests/ -q
-      - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ $([ -d examples ] && echo examples/)
+      # `tools/` is linted too: mutation_check.py is tracked, is a required
+      # check, and CONTRIBUTING/CLAUDE both document it as covered. It was
+      # not actually in this command until 2026-08-02.
+      - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ tools/ $([ -d examples ] && echo examples/)
 
   # Hooks are wired locally too (`pre-commit install`), but a local hook is
   # bypassable with --no-verify and absent on a fresh clone, so the real gate
