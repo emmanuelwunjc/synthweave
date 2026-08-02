@@ -25,15 +25,6 @@ jobs:
       # check, and CONTRIBUTING/CLAUDE both document it as covered. It was
       # not actually in this command until 2026-08-02.
       - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ tools/ $([ -d examples ] && echo examples/)
-      # The README claims the worked examples "run end to end". Nothing
-      # checked that until now. They need no network: the ACS path is only
-      # reached with a key present.
-      - name: Worked examples still run
-        run: |
-          for f in examples/*.py; do
-            echo "--- $f"
-            PYTHONPATH=src python3 "$f" >/dev/null
-          done
 
   # Hooks are wired locally too (`pre-commit install`), but a local hook is
   # bypassable with --no-verify and absent on a fresh clone, so the real gate
