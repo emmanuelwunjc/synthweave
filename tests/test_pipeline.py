@@ -453,6 +453,34 @@ def test_reserved_column_names_are_rejected(people):
         sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
 
 
+def test_a_nan_choice_weight_is_rejected_instead_of_collapsing_the_column():
+    """A NaN passes `< 0` and `<= 0` checks silently: every comparison is False.
+
+    Weights derived from `value_counts(normalize=True).reindex(categories)`
+    produce exactly this for any category absent from the data, so this is an
+    ordinary input, not a contrived one.
+    """
+    person = sw.Entity(
+        "person",
+        count=20,
+        attributes={"education": sw.Choice(["HS", "College"], [float("nan"), 1.0])},
+    )
+    table = sw.Table("t", grain=sw.PerEntity("person"), carry=["education"])
+    with pytest.raises(ValueError, match="finite"):
+        sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
+
+
+def test_an_infinite_choice_weight_is_rejected_instead_of_collapsing_the_column():
+    person = sw.Entity(
+        "person",
+        count=20,
+        attributes={"education": sw.Choice(["HS", "College"], [float("inf"), 1.0])},
+    )
+    table = sw.Table("t", grain=sw.PerEntity("person"), carry=["education"])
+    with pytest.raises(ValueError, match="finite"):
+        sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
+
+
 # --- multiple entities ------------------------------------------------------
 #
 # Every test above this line uses a single entity. These drive the cross-entity

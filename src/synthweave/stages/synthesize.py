@@ -402,7 +402,7 @@ class CARTSynthesizer:
             )
 
         model = _FittedCART(
-            self.columns, self.predictors, self.max_depth, leaf, self.numeric
+            self.columns, self.predictors, self.max_depth, leaf, ctx.seed, self.numeric
         ).fit(train)
         self._fitted[table.name] = model
         self._complete[table.name] = False
@@ -431,11 +431,12 @@ def _chain(first: list[pd.DataFrame], rest: Iterator[pd.DataFrame]) -> Iterator[
 class _FittedCART:
     """Trees plus per-leaf donor pools, one per synthesized column."""
 
-    def __init__(self, columns, predictors, max_depth, min_samples_leaf, numeric=()):
+    def __init__(self, columns, predictors, max_depth, min_samples_leaf, seed, numeric=()):
         self.columns = columns
         self.predictors = predictors
         self.max_depth = max_depth
         self.min_samples_leaf = min_samples_leaf
+        self.seed = seed
         self.numeric = set(numeric)
         self.codes: dict[str, dict[Any, int]] = {}
         self.trees: dict[str, Any] = {}
@@ -475,13 +476,25 @@ class _FittedCART:
             X = self._encode(train, features)
             y = train[target]
             numeric = self._numeric(target, y)
+            # sklearn's "best" splitter still consumes randomness to break
+            # ties between equally-good splits, so an unseeded tree gives a
+            # different fit (and so different donor groupings) on every
+            # call, even from identical data. Deriving the seed from the run
+            # seed and the target keeps that tie-break itself deterministic,
+            # and salting per target keeps one column's tie-break from
+            # correlating with another's.
+            random_state = int(_hash.hash_key(self.seed, f"cart\x00{target}"), 16) % (2**32)
             tree = (
                 DecisionTreeRegressor(
-                    max_depth=self.max_depth, min_samples_leaf=self.min_samples_leaf
+                    max_depth=self.max_depth,
+                    min_samples_leaf=self.min_samples_leaf,
+                    random_state=random_state,
                 )
                 if numeric
                 else DecisionTreeClassifier(
-                    max_depth=self.max_depth, min_samples_leaf=self.min_samples_leaf
+                    max_depth=self.max_depth,
+                    min_samples_leaf=self.min_samples_leaf,
+                    random_state=random_state,
                 )
             )
             y_fit = self._as_numbers(target, y) if numeric else self._encode_column(target, y)

@@ -130,8 +130,7 @@ class SSAFirstName:
 
     def _pool(self, year, sex) -> tuple[np.ndarray, np.ndarray]:
         subset = self._data[self._data["year"] == year]
-        if sex is not None:
-            subset = subset[subset["sex"] == sex]
+
         if subset.empty:
             raise ValueError(f"SSAFirstName: no data for year={year!r} sex={sex!r}")
         pooled = subset.groupby("name", sort=False)["count"].sum()
