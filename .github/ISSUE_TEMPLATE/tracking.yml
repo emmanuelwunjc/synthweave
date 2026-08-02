@@ -1,0 +1,49 @@
+name: Tracking issue
+description: A hub for a theme. Carries the plan and its state, not the work.
+labels: ["meta/tracking"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A tracking issue is **not** for discussion, questions, or bug reports.
+        Open a dedicated issue for those and link it here. This hub stays readable.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One paragraph. What is true when every child closes?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: Ordered checklist. Each item is one child issue, one PR.
+      value: |
+        - [ ] #
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+    validations:
+      required: true
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      value: "None"
+    validations:
+      required: true
+
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions made
+      description: Append-only. Date, choice, one-line reason.
+      value: "None yet."

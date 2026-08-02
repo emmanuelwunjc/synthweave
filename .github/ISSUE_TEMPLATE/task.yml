@@ -1,0 +1,84 @@
+name: Task
+description: A unit of work sized to one pull request.
+labels: ["status/needs-decision"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue is one reviewable pull request. If this needs two PRs, file two issues.
+
+        An issue only gets `agent/ready` when **Verification** is a runnable command
+        and **Open questions** says "None". That one rule matters more than every label.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One sentence. If it takes two, this is two issues.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >
+        Why this, why now. Link the tracking issue. Include the reproduction and its
+        real output if this is a defect. Assume the reader has never seen this repo.
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files likely involved
+      description: >
+        A hint, not a constraint. Leave blank rather than guessing: a wrong hint is
+        worse than none.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable behaviours, as checkboxes. Not implementation steps.
+      value: |
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: >
+        The literal command, and what it prints when this is done. This turns "done"
+        from a judgement into a shell exit code. THIS IS THE MOST IMPORTANT FIELD.
+      placeholder: |
+        PYTHONPATH=src python3 -m pytest tests/test_x.py::test_y -q
+        # currently fails with: TypeError: ...
+        # after the fix: 1 passed
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: >
+        What NOT to change. An agent will not limit itself; a human would ask. Name
+        the adjacent things that look related and are somebody else's issue.
+      value: |
+        -
+    validations:
+      required: true
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: >
+        Anything undecided. Write "None" only if there is genuinely nothing to decide.
+        Anything here means this is not `agent/ready` yet.
+      value: "None"
+    validations:
+      required: true
