@@ -6,6 +6,7 @@ and running the pipeline, never by reaching into the registry.
 
 from __future__ import annotations
 
+import itertools
 import warnings
 
 import numpy as np
@@ -927,3 +928,79 @@ def test_a_joint_for_a_column_with_no_declared_marginal_is_fine():
         }},
     )
     assert prior.joints
+
+
+# --- determinism under tied splits ------------------------------------------
+
+
+@pytest.fixture
+def tie_prone() -> sw.Schema:
+    """A training frame engineered so the root split ties exactly.
+
+    Two binary predictors, each appearing in every one of the four
+    combinations equally often, with `score = flag_a + flag_b`: splitting the
+    root node on `flag_a` alone and splitting it on `flag_b` alone reduce
+    variance by the identical amount, by construction. With `max_depth=1` the
+    tree must commit to one split and never revisit it, so which feature wins
+    the tie is not just relabeled away as it would be in a fully grown tree
+    (see the comment on the test below) -- it changes which rows share a
+    leaf, and so which rows can donate to which.
+
+    A well-separated fixture like `careers` (400 entities, conditionals with
+    real gaps) never forces a tie and so cannot catch a missing
+    `random_state`. This one is built to.
+    """
+    combos = list(itertools.product([0, 1], [0, 1]))
+    train = pd.DataFrame(
+        {
+            "flag_a": [a for a, _ in combos] * 8,
+            "flag_b": [b for _, b in combos] * 8,
+        }
+    )
+    train["score"] = train["flag_a"] + train["flag_b"]
+
+    entity = sw.Entity(
+        "person",
+        count=30,
+        attributes={
+            "flag_a": sw.Choice([0, 1], [0.5, 0.5]),
+            "flag_b": sw.Choice([0, 1], [0.5, 0.5]),
+        },
+    )
+    table = sw.Table(
+        "scores",
+        grain=sw.PerEntity("person"),
+        carry=["flag_a", "flag_b"],
+        # A placeholder: CARTSynthesizer overwrites it entirely. Only the
+        # Empirical `train` frame below feeds the fit.
+        columns={"score": sw.Integer(0, 5)},
+    )
+    schema = sw.Schema(entities=[entity], tables=[table], seed=7)
+    return schema, train
+
+
+def test_synthesis_is_deterministic_under_tied_splits(tie_prone):
+    """Invariant 1, on the fixture built to expose it.
+
+    Same schema, same seed, thirty fits in one process: every output must be
+    byte-identical. Before `random_state` was set on the trees, sklearn broke
+    the root-split tie differently from fit to fit -- non-deterministically
+    on a fully grown tree too, but there it only relabels which integer names
+    a leaf, so the row groupings it hands to donor sampling come out the
+    same. Capping `max_depth=1` here makes the tie decide the actual leaf
+    partition, so a differing tie-break becomes a differing output.
+    """
+    schema, train = tie_prone
+    synthesizer = sw.CARTSynthesizer(
+        ["score"],
+        tables=["scores"],
+        predictors=["flag_a", "flag_b"],
+        min_samples_leaf=5,
+        max_depth=1,
+        structure=sw.Empirical(train),
+        numeric=["score"],
+    )
+    first = sw.Pipeline(schema, synthesizer=synthesizer).run()["scores"]
+    for _ in range(29):
+        other = sw.Pipeline(schema, synthesizer=synthesizer).run()["scores"]
+        pd.testing.assert_frame_equal(other, first)
