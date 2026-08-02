@@ -98,9 +98,6 @@ def pick(
         w = np.asarray(weights, dtype=np.float64)
         if w.shape != values.shape:
             raise ValueError(f"weights length {w.shape} does not match values {values.shape}")
-        if not np.all(np.isfinite(w)):
-            bad = np.flatnonzero(~np.isfinite(w))[0]
-            raise ValueError(f"weights must be finite, got {w[bad]!r} at index {bad}")
         if np.any(w < 0):
             raise ValueError("weights must be non-negative")
         total = w.sum()
