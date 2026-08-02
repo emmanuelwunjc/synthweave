@@ -77,6 +77,34 @@ def test_coverage_limits_entities_in_a_table(people, roster):
     assert set(result["subset"]["student_id"]) < set(result["roster"]["student_id"])
 
 
+def test_carrying_a_leaf_draws_its_whole_transitive_dependency_chain():
+    """education -> sector -> wage, carrying only the leaf.
+
+    A direct-dependency check draws sector (wage's dependency) but not
+    education (sector's dependency), so wage's Conditional draw fails
+    looking for a column that validation already declared present.
+    """
+    person = sw.Entity(
+        "person",
+        count=20,
+        attributes={
+            "education": sw.Choice(["HS", "College"], [0.5, 0.5]),
+            "sector": sw.Conditional(
+                "education", {"HS": sw.Constant("retail"), "College": sw.Constant("tech")}
+            ),
+            "wage": sw.Conditional(
+                "sector", {"retail": sw.Constant(30_000), "tech": sw.Constant(90_000)}
+            ),
+        },
+        identifiers=[sw.Identifier("tax_id", prefix="TIN", digits=9)],
+    )
+    table = sw.Table("t", grain=sw.PerEntity("person"), carry=["wage"], identifiers=["tax_id"])
+    result = sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=1)).run()
+
+    assert set(result["t"].columns) == {"tax_id", "wage"}
+    assert set(result["t"]["wage"]) <= {30_000, 90_000}
+
+
 # --- entity consistency and relational integrity ---------------------------
 
 

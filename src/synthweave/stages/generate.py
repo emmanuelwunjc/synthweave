@@ -145,17 +145,22 @@ class RuleGenerator:
         """Entity attributes, keyed on the entity so they repeat across its rows."""
         if not table.carry:
             return chunk
-        needed = {name: entity.attributes[name] for name in table.carry}
         order = resolve_order(entity.attributes)
         keys = chunk[ENTITY_KEY].to_numpy()
         drawn = pd.DataFrame(index=chunk.index)
 
-        # Dependencies of a carried attribute are drawn too, then dropped if
-        # the table did not ask for them.
+        # A carried attribute's dependency is drawn too, and so is that
+        # dependency's own dependency, transitively. `order` is topologically
+        # sorted (dependencies before dependents), so walking it in reverse
+        # and growing `needed` as each dependent is confirmed needed reaches
+        # the full transitive closure in one pass.
+        needed = set(table.carry)
+        for name in reversed(order):
+            if name in needed:
+                needed.update(entity.attributes[name].depends_on())
+
         for name in order:
-            if name not in needed and not any(
-                name in entity.attributes[c].depends_on() for c in needed
-            ):
+            if name not in needed:
                 continue
             drawn[name] = _draw(
                 entity.attributes[name], keys, ctx, f"entity\x00{entity.name}\x00{name}", drawn

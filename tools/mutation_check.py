@@ -334,6 +334,12 @@ MUTATIONS = [
         "            elif list(chunk.columns) != self._csv_columns:",
         "            elif False:",
     ),
+    (
+        "#44 a carried attribute's transitive dependency chain is drawn in full",
+        "src/synthweave/stages/generate.py",
+        "            if name in needed:\n                needed.update(entity.attributes[name].depends_on())",
+        "            pass",
+    ),
 ]
 
 
