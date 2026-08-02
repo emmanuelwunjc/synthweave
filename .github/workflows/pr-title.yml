@@ -1,0 +1,31 @@
+# CONTRIBUTING.md requires Conventional Commit subjects. Because PRs are
+# squash-merged, the PR TITLE becomes the commit on main and is reproduced
+# verbatim in generated release notes -- so an untyped title is permanent.
+# That already happened once: "PII generators, real-data connectors, ..."
+# (#24) is baked into the v0.2.0 notes with no type prefix.
+#
+# Prose did not prevent it. This does.
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  conventional:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Title must be a Conventional Commit subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "title: $TITLE"
+          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|chore|docs|refactor|test|perf)(\([a-z0-9._/-]+\))?!?: .+'; then
+            echo "OK"
+          else
+            echo "::error::PR title must be '<type>(<scope>): description'." \
+                 "Allowed types: feat, fix, chore, docs, refactor, test, perf." \
+                 "The title becomes the squash commit on main and appears in the" \
+                 "release notes, so it is permanent."
+            exit 1
+          fi
