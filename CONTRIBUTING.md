@@ -82,6 +82,28 @@ Required checks: `test (3.10)`, `pre-commit`, `mutation-check`. Branch
 protection blocks merging until they pass, and a PR must be up to date with
 `main` first.
 
+## Working in parallel
+
+Several sessions may work this repo at once. The rules above still hold; two
+more apply.
+
+**Own files, not features.** Before starting, agree which files each session
+owns, and never edit a file you do not own. Reaching across is the failure
+mode that corrupts a repo, and it is not caught by tests — both sides pass
+locally and conflict at merge.
+
+**`tools/mutation_check.py` is the one file everybody touches.** Every fix
+appends to `MUTATIONS`. **Append at the end of the list, never in the
+middle**, so a conflict resolves as one mechanical hunk instead of a
+semantic merge. Merge those PRs one at a time.
+
+**`src/synthweave/__init__.py` is shared and load-bearing** — it is the
+public API surface. Say so in the PR title if you touch it, and expect to
+serialise with anything else that does.
+
+If a change needs a file you do not own, say so on the issue and stop.
+Asking costs less than an untangling.
+
 ## Releases
 
 Versions live in `pyproject.toml` and nowhere else. `__version__` reads it back
