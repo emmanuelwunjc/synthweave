@@ -328,6 +328,12 @@ MUTATIONS = [
         "        if not np.all(np.isfinite(w)):",
         "        if False:",
     ),
+    (
+        "#40 CART trees seeded so tied splits break the same way every fit",
+        "src/synthweave/stages/synthesize.py",
+        "            random_state = int(_hash.hash_key(self.seed, f\"cart\\x00{target}\"), 16) % (2**32)",
+        "            random_state = None",
+    ),
 ]
 
 
