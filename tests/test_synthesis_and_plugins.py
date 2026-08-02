@@ -597,7 +597,10 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
         columns={"employed": sw.Choice([True, False], [0.5, 0.5])},
     )
     prior = sw.Prior(
-        marginals={"education": {"HS": 0.6, "College": 0.4}, "employed": {True: 0.5, False: 0.5}},
+        # No `employed` marginal: the joint below is the only statement
+        # about that column, and declaring 0.5/0.5 alongside a joint
+        # implying 0.65/0.35 is the conflict #37 now rejects.
+        marginals={"education": {"HS": 0.6, "College": 0.4}},
         joints={
             ("education", "employed"): {
                 ("HS", True): 0.30,
@@ -732,7 +735,10 @@ def test_a_joint_prior_is_chunk_invariant(people):
     )
     schema = sw.Schema(entities=[people], tables=[table], seed=1)
     prior = sw.Prior(
-        marginals={"education": {"HS": 0.6, "College": 0.4}, "employed": {True: 0.5, False: 0.5}},
+        # No `employed` marginal: the joint below is the only statement
+        # about that column, and declaring 0.5/0.5 alongside a joint
+        # implying 0.65/0.35 is the conflict #37 now rejects.
+        marginals={"education": {"HS": 0.6, "College": 0.4}},
         joints={
             ("education", "employed"): {
                 ("HS", True): 0.30,
@@ -879,3 +885,45 @@ def test_a_well_formed_marginals_dict_still_coerces(people):
     """The check must not cost the shorthand it guards."""
     synth = sw.CARTSynthesizer(["tenure"], structure={"tenure": {"own": 0.65, "rent": 0.35}})
     assert isinstance(synth.structure, sw.Prior)
+
+
+def test_a_joint_disagreeing_with_a_declared_marginal_is_rejected():
+    """Both are published figures; silently dropping one defeats Prior.
+
+    The joint overwrote both columns it spans, so a declared marginal that
+    disagreed was discarded with no error. A user who states 60% HS and a
+    joint implying 50% got 50% and was never told which of their two cited
+    figures the output actually honours.
+    """
+    with pytest.raises(ValueError, match="education"):
+        sw.Prior(
+            marginals={"education": {"HS": 0.6, "College": 0.4}},
+            joints={("education", "employed"): {
+                ("HS", True): 0.25, ("HS", False): 0.25,
+                ("College", True): 0.25, ("College", False): 0.25,
+            }},
+        )
+
+
+def test_a_joint_consistent_with_its_marginals_is_accepted():
+    """The check must not cost the ordinary case it guards."""
+    prior = sw.Prior(
+        marginals={"education": {"HS": 0.6, "College": 0.4}},
+        joints={("education", "employed"): {
+            ("HS", True): 0.4, ("HS", False): 0.2,
+            ("College", True): 0.3, ("College", False): 0.1,
+        }},
+    )
+    assert prior.joints
+
+
+def test_a_joint_for_a_column_with_no_declared_marginal_is_fine():
+    """Nothing to disagree with means nothing to check."""
+    prior = sw.Prior(
+        marginals={"region": {"north": 0.5, "south": 0.5}},
+        joints={("education", "employed"): {
+            ("HS", True): 0.25, ("HS", False): 0.25,
+            ("College", True): 0.25, ("College", False): 0.25,
+        }},
+    )
+    assert prior.joints

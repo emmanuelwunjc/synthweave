@@ -72,6 +72,58 @@ class Empirical:
         return self.frame
 
 
+# Marginals and joints are both figures the user cited from somewhere. A
+# joint overwrites the columns it spans, so a marginal that disagrees is
+# silently discarded and the output honours only one of the two published
+# numbers, with nothing saying which. That is checked at construction rather
+# than at generation, so the error names the config and not a frame.
+_MARGIN_TOLERANCE = 1e-6
+
+
+def _check_joints_agree_with_marginals(
+    marginals: Mapping[str, Mapping[Any, float]],
+    joints: Mapping[tuple[str, str], Mapping[tuple[Any, Any], float]],
+) -> None:
+    """Raise when a joint implies a different marginal than the declared one."""
+    for (left, right), dist in joints.items():
+        for position, column in enumerate((left, right)):
+            declared = marginals.get(column)
+            if not declared:
+                # No declared marginal for this column, so nothing to disagree
+                # with. The joint is the only statement about it.
+                continue
+            implied: dict[Any, float] = {}
+            for pair, weight in dist.items():
+                implied[pair[position]] = implied.get(pair[position], 0.0) + float(weight)
+            total = sum(implied.values())
+            if total > 0:
+                implied = {k: v / total for k, v in implied.items()}
+
+            declared_total = sum(float(v) for v in declared.values())
+            normalised = {
+                k: float(v) / declared_total if declared_total else 0.0
+                for k, v in declared.items()
+            }
+
+            disagreements = [
+                (value, share, implied.get(value, 0.0))
+                for value, share in sorted(normalised.items(), key=str)
+                if abs(share - implied.get(value, 0.0)) > _MARGIN_TOLERANCE
+            ]
+            if disagreements:
+                detail = ", ".join(
+                    f"{value!r}: marginal says {share:.4g}, joint implies {got:.4g}"
+                    for value, share, got in disagreements[:3]
+                )
+                raise ValueError(
+                    f"Prior: the joint {(left, right)!r} implies a different marginal for "
+                    f"{column!r} than the one declared ({detail}). Both are figures you "
+                    "cited, and applying the joint would silently discard the marginal. "
+                    "Reconcile them, or drop the marginal for that column and let the "
+                    "joint be the only statement about it."
+                )
+
+
 @register("structure", "prior")
 class Prior:
     """Structure from published aggregates rather than rows.
@@ -98,6 +150,7 @@ class Prior:
         self.marginals = marginals
         self.joints = joints or {}
         self.rows = rows
+        _check_joints_agree_with_marginals(self.marginals, self.joints)
 
     def training_frame(self, table: Table, ctx: RunContext) -> pd.DataFrame:
         keys = np.array([f"prior:{table.name}:{i}" for i in range(self.rows)], dtype=object)

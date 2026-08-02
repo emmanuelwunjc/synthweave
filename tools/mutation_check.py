@@ -266,6 +266,12 @@ MUTATIONS = [
         "",
     ),
     (
+        "#37 joint disagreeing with a declared marginal is rejected",
+        "src/synthweave/stages/synthesize.py",
+        "        _check_joints_agree_with_marginals(self.marginals, self.joints)",
+        "        pass",
+    ),
+    (
         "empty-donor invariant: donor map covers every leaf",
         "src/synthweave/stages/synthesize.py",
         """            self.donors[target] = {
