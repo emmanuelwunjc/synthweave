@@ -19,6 +19,7 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     permissions:
       # Mints the short-lived OIDC token PyPI exchanges for upload rights.
@@ -39,6 +40,7 @@ jobs:
           # below needs tomllib, which is stdlib only from 3.11. Compatibility
           # with 3.10 is proven by the test matrix in ci.yml, not here.
           python-version: "3.12"
+          cache: pip
 
       # The tag is the release's claim about what version this is; the built
       # artifact is the truth. Fail loudly when they disagree, rather than
