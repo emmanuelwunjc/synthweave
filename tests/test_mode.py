@@ -48,6 +48,18 @@ def test_normal_missing_sd_raises_naming_it():
         m.attribute("income", distribution="normal", mean=1)
 
 
+def test_normal_missing_mean_raises_naming_it():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="mean"):
+        m.attribute("income", distribution="normal", sd=1)
+
+
+def test_an_unknown_kwarg_is_rejected_rather_than_dropped():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="typo"):
+        m.attribute("income", min=0, max=1, typo=0.1)
+
+
 # --- attribute(): noise-kwarg bookkeeping --------------------------------
 
 
@@ -78,15 +90,45 @@ def test_table_returns_a_real_table():
 
 def test_schema_run_produces_null_values_near_the_configured_missing_rate():
     m = sw.Mode.metadata()
-    m.attribute("income", min=0, max=100, missing_rate=0.3)
-    person = m.entity(
-        "person", count=20_000, attributes={"income": m.attribute("income", min=0, max=100)}
-    )
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
     table = m.table("records", grain="person", carry=["income"])
 
     result = m.schema(entities=[person], tables=[table], seed=42).run()
 
     assert 0.29 < result["records"]["income"].isna().mean() < 0.31
+
+
+def test_missing_rate_reaches_a_column_carried_by_wildcard():
+    m = sw.Mode.metadata()
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+    table = m.table("records", grain="person", carry="*")
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_missing_rate_reaches_a_column_declared_after_the_table():
+    m = sw.Mode.metadata()
+    table = m.table("records", grain="person", carry=["income"])
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_a_noise_rate_matching_no_column_anywhere_raises():
+    m = sw.Mode.metadata()
+    rule = m.attribute("incme", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=10, attributes={"income": rule})
+    table = m.table("records", grain="person", carry=["income"])
+
+    with pytest.raises(ValueError, match="would never be applied"):
+        m.schema(entities=[person], tables=[table], seed=1)
 
 
 def test_schema_run_matches_hand_built_pipeline_for_the_same_seed():

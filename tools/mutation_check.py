@@ -419,6 +419,43 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#87 mode noise resolves against the schema's expanded carry (carry=*)",
+        "src/synthweave/mode.py",
+        "            for column_name in list(table.carry) + list(table.columns):",
+        """            for column_name in list(table.columns) + (
+                list(table.carry) if isinstance(table.carry, list) else []
+            ):""",
+    ),
+    (
+        "#87 a mode noise rate declared after table() still reaches the table",
+        "src/synthweave/mode.py",
+        """        return Table(
+            name,
+            grain=grain,
+            columns=columns or {},
+            carry=carry,
+            identifiers=identifiers or (),
+            coverage=coverage,
+        )""",
+        """        # Reverted: freeze the rates known now, which is what resolving
+        # the noise map inside table() amounted to.
+        known = set(self._noise_kwargs)
+
+        class _AsOfNow(dict):
+            def get(self, key, default=None):
+                return dict.get(self, key, default) if key in known else default
+
+        self._noise_kwargs = _AsOfNow(self._noise_kwargs)
+        return Table(
+            name,
+            grain=grain,
+            columns=columns or {},
+            carry=carry,
+            identifiers=identifiers or (),
+            coverage=coverage,
+        )""",
+    ),
+    (
         "#48 unregister actually removes the entry",
         "src/synthweave/registry.py",
         "    del table[name]",
