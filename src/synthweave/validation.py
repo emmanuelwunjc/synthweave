@@ -63,6 +63,8 @@ def _validate_table(schema: Schema, table) -> None:
     except ValueError as exc:
         raise SchemaError(f"{where}: {exc}") from exc
 
+    _check_unique(list(table.carry), f"{where} carried attribute")
+
     for attr in table.carry:
         if attr not in entity.attributes:
             raise SchemaError(
@@ -73,6 +75,8 @@ def _validate_table(schema: Schema, table) -> None:
             raise SchemaError(
                 f"{where}: {attr!r} is both a carried entity attribute and a table column"
             )
+
+    _check_unique(list(table.identifiers), f"{where} identifier")
 
     known_tags = {i.tag for i in entity.identifiers}
     for tag in table.identifiers:

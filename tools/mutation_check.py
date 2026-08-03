@@ -352,6 +352,18 @@ MUTATIONS = [
         "                chunk[column] = _restore_dtype(values, original_dtype)",
         "                chunk[column] = values",
     ),
+    (
+        "#45.1a duplicate table carry names are rejected",
+        "src/synthweave/validation.py",
+        '    _check_unique(list(table.carry), f"{where} carried attribute")',
+        "    pass",
+    ),
+    (
+        "#45.1b duplicate table identifier names are rejected",
+        "src/synthweave/validation.py",
+        '    _check_unique(list(table.identifiers), f"{where} identifier")',
+        "    pass",
+    ),
 ]
 
 

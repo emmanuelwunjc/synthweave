@@ -443,6 +443,22 @@ def test_a_table_asking_for_an_unknown_identifier_is_rejected(people):
         sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
 
 
+def test_a_table_carrying_the_same_attribute_twice_is_rejected(people):
+    table = sw.Table(
+        "bad", grain=sw.PerEntity("person"), carry=["education", "education"]
+    )
+    with pytest.raises(sw.SchemaError, match="duplicate"):
+        sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
+
+
+def test_a_table_asking_for_the_same_identifier_twice_is_rejected(people):
+    table = sw.Table(
+        "bad", grain=sw.PerEntity("person"), identifiers=["tax_id", "tax_id"]
+    )
+    with pytest.raises(sw.SchemaError, match="duplicate"):
+        sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
+
+
 def test_an_unknown_entity_is_rejected(people):
     table = sw.Table("bad", grain=sw.PerEntity("ghost"))
     with pytest.raises(sw.SchemaError, match="ghost"):
