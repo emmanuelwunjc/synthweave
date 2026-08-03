@@ -123,6 +123,30 @@ def test_dotenv_key_is_used_when_env_var_unset(monkeypatch, tmp_path):
     assert "key=dotenv-key" in captured["url"]
 
 
+def test_dotenv_lookup_stops_at_the_project_root(monkeypatch, tmp_path):
+    """A `.env` above the project root belongs to someone else.
+
+    The walk-up used to run all the way to `/`, so a call made from a nested
+    directory could silently pick up a key from an unrelated ancestor, up to
+    and including the home directory. The walk now stops at the first
+    directory holding a project-root marker.
+    """
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / ".env").write_text("CENSUS_API_KEY=ancestor-key\n")
+    project = outer / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "unrelated"\n')
+    monkeypatch.chdir(project)
+
+    # Patched so that a key found by mistake cannot reach the live API.
+    with patch("urllib.request.urlopen") as urlopen:
+        with pytest.raises(RuntimeError, match="key_signup"):
+            fetch_pums(["AGEP", "PINCP"], state="36", cache_dir=None)
+    assert urlopen.call_count == 0
+
+
 # --- state name/abbreviation shorthand -----------------------------------
 
 

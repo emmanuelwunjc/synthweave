@@ -443,6 +443,14 @@ MUTATIONS = [
         cache_path.write_text(json.dumps(payload))
     return _to_frame(payload, variables, url)""",
     ),
+    (
+        "#62 I33 the .env walk stops at the project root",
+        "src/synthweave/connectors/acs_pums.py",
+        """        if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
+            break
+""",
+        "",
+    ),
 ]
 
 
