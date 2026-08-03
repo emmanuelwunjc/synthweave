@@ -341,7 +341,8 @@ PYTHONPATH=src python -m pytest tests/ -q
 Tests run offline and go through the public API only, so internal stage code can
 be rewritten without touching them. Every bug fix is checked by reverting it and
 confirming a test goes red: a fix nothing catches is not a fix. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md). For everything else in `docs/` and which
+file covers what, see [docs/MAP.md](docs/MAP.md).
 
 ## Where this came from
 

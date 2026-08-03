@@ -1,5 +1,8 @@
 # Contributing
 
+Looking for a specific doc (roadmap, past bug writeups, research, agent
+dispatch)? [docs/MAP.md](docs/MAP.md) is the index of what covers what.
+
 ## Setup
 
 ```bash
