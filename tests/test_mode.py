@@ -7,7 +7,9 @@ table()/schema(), assert on the result or on a pipeline run.
 
 from __future__ import annotations
 
+import json
 import re
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -224,3 +226,99 @@ def test_schema_run_synthesizes_real_data_columns_from_the_donor_pool(donor_fram
 
     invariants.assert_values_come_from(result["roster"], "education", donor_frame["education"])
     invariants.assert_values_come_from(result["roster"], "wage", donor_frame["wage"])
+
+
+# --- sw.Mode.scope(): wraps the ACS PUMS connector -------------------------
+
+_ACS_PAYLOAD = [["AGEP", "PINCP", "state"]] + [
+    [str(20 + i % 50), str(20_000 + i * 137), "36"] for i in range(200)
+]
+
+
+def _mock_acs_response(status: int = 200):
+    response = MagicMock()
+    response.status = status
+    response.read.return_value = json.dumps(_ACS_PAYLOAD).encode()
+    response.__enter__.return_value = response
+    return response
+
+
+@pytest.fixture(autouse=True)
+def _acs_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CENSUS_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.mark.parametrize("area_code", ["NY", "New York", "36"])
+def test_scope_constructs_from_any_form_resolve_state_accepts(area_code):
+    m = sw.Mode.scope(area_code=area_code)
+    assert isinstance(m, sw.Mode)
+
+
+def test_attribute_without_variable_raises_naming_it():
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage")
+
+
+def test_attribute_with_variable_registers_it():
+    m = sw.Mode.scope(area_code="NY")
+    m.attribute("wage", variable="PINCP")
+    assert m._variables["wage"] == "PINCP"
+
+
+def test_scopes_docstring_first_sentence_states_state_level_only():
+    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0].lower()
+    assert "state" in first_sentence
+    assert "only" in first_sentence
+
+
+def test_schema_run_calls_fetch_pums_once_for_every_attribute_combined():
+    m = sw.Mode.scope(area_code="NY")
+    age = m.attribute("age", variable="AGEP")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"age": age, "wage": wage})
+    table = m.table("roster", grain="person", carry=["age", "wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        m.schema(entities=[person], tables=[table], seed=5).run()
+
+    assert urlopen.call_count == 1
+
+
+def test_a_second_run_on_the_same_schema_does_not_refetch():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        schema = m.schema(entities=[person], tables=[table], seed=5)
+        schema.run()
+        first_count = urlopen.call_count
+        schema.run()
+        assert urlopen.call_count == first_count
+
+
+def test_schema_run_synthesizes_from_real_acs_rows():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        result = m.schema(entities=[person], tables=[table], seed=5).run()
+
+    donor_wages = {20_000 + i * 137 for i in range(200)}
+    assert set(result["roster"]["wage"]) <= donor_wages
+
+
+def test_fetch_pums_failure_propagates_unchanged():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response(status=500)):
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            m.schema(entities=[person], tables=[table], seed=5).run()

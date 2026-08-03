@@ -52,6 +52,17 @@ class Mode:
         """
         return RealDataMode(_load_source(source), epsilon=epsilon)
 
+    @staticmethod
+    def scope(area_code: str) -> "ScopeMode":
+        """Maps onto state-level ACS geography only, nothing finer than that.
+
+        `fetch_pums` resolves geography to a US state and no further (no
+        county, no PUMA); `area_code` is passed straight through to it as
+        `state=`, so any form `_resolve_state` accepts works here too (a
+        FIPS code, a USPS abbreviation, or a full state name).
+        """
+        return ScopeMode(area_code)
+
     def attribute(self, name: str, **kwargs: Any) -> Rule:
         noise_kwargs = {k: kwargs.pop(k) for k in _NOISE_RATE_KWARGS if k in kwargs}
         if noise_kwargs:
@@ -163,21 +174,55 @@ class RealDataMode(Mode):
         for name, eps in self._real_data_epsilon.items():
             groups.setdefault(eps, []).append(name)
         synthesizers = [
-            CARTSynthesizer(columns=columns, structure=Empirical(self._frame), **_cart_knobs(eps))
+            _empirical_cart(columns, self._frame, **_cart_knobs(eps))
             for eps, columns in groups.items()
         ]
-        synthesizer = synthesizers[0] if len(synthesizers) == 1 else _ChainedSynthesizer(synthesizers)
+        return {"synthesizer": _chain(synthesizers)}
+
+
+class ScopeMode(Mode):
+    """Real ACS PUMS population microdata for a locked-down US state,
+    fetched automatically and synthesized the same way `real_data` mode is.
+    """
+
+    def __init__(self, area_code: str) -> None:
+        super().__init__()
+        self.area_code = area_code
+        self._variables: dict[str, str] = {}
+        self._fetched: pd.DataFrame | None = None
+
+    def _build_rule(self, name: str, *, variable: str | None = None) -> Rule:
+        if variable is None:
+            raise ValueError(f"attribute {name!r}: scope mode needs variable=")
+        self._variables[name] = variable
+        return _RealDataColumn(name)
+
+    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+        if not self._variables:
+            return {}
+        if self._fetched is None:
+            from .connectors.acs_pums import fetch_pums
+
+            fetched = fetch_pums(list(self._variables.values()), state=self.area_code)
+            # The mode's column names and the ACS variable codes they were
+            # requested under can differ (`attribute("wage", variable="PINCP")`),
+            # but the synthesizer stage matches by the mode's own column name.
+            self._fetched = fetched.rename(
+                columns={variable: name for name, variable in self._variables.items()}
+            )
+        synthesizer = _empirical_cart(list(self._variables), self._fetched)
         return {"synthesizer": synthesizer}
 
 
 class _RealDataColumn(_BaseRule):
-    """Placeholder for a real_data-sourced column.
+    """Placeholder for a column sourced from real microdata, supplied
+    (`real_data` mode) or fetched (`scope` mode).
 
     Sits in an `Entity`'s attributes or a `Table`'s columns like any other
     `Rule` so `entity()`/`table()` need no special casing, but its `draw()`
     is never meant to survive a real run: the `CARTSynthesizer` built by
-    `RealDataMode._extra_pipeline_kwargs()` overwrites the column entirely
-    once fitted on the donor frame.
+    the owning mode's `_extra_pipeline_kwargs()` overwrites the column
+    entirely once fitted on the donor frame.
     """
 
     def __init__(self, name: str) -> None:
@@ -185,6 +230,22 @@ class _RealDataColumn(_BaseRule):
 
     def draw(self, keys, *, seed, salt, frame=None):
         return np.full(len(keys), None, dtype=object)
+
+
+def _empirical_cart(columns: list[str], frame: pd.DataFrame, **knobs: Any) -> CARTSynthesizer:
+    """One `CARTSynthesizer` fit against `frame` via `Empirical`.
+
+    Shared by `RealDataMode` and `ScopeMode`: both wire real donor rows into
+    the same structure-source-plus-synthesizer shape, differing only in
+    where the frame came from (user-supplied vs. `fetch_pums`) and whether
+    `knobs` carries an epsilon-derived generalization setting.
+    """
+    return CARTSynthesizer(columns=columns, structure=Empirical(frame), **knobs)
+
+
+def _chain(synthesizers: list[CARTSynthesizer]) -> CARTSynthesizer | "_ChainedSynthesizer":
+    """A single synthesizer's worth of stage, whether one or several groups."""
+    return synthesizers[0] if len(synthesizers) == 1 else _ChainedSynthesizer(synthesizers)
 
 
 def _cart_knobs(epsilon: float) -> dict[str, Any]:
