@@ -419,6 +419,24 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#88 non-positive real_data epsilon rejected instead of clamped to 0.01",
+        "src/synthweave/mode.py",
+        '    if epsilon <= 0:\n        raise ValueError(f"{where}: epsilon must be positive, got {epsilon!r}")',
+        "    pass",
+    ),
+    (
+        "#88 a stray attribute kwarg in real_data mode is named, not a bare TypeError",
+        "src/synthweave/mode.py",
+        """        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: real_data mode takes only epsilon, got "
+                f"{sorted(kwargs)}; the column's distribution comes from the "
+                "donor frame, not from a declared rule"
+            )
+""",
+        "",
+    ),
+    (
         "#48 unregister actually removes the entry",
         "src/synthweave/registry.py",
         "    del table[name]",
