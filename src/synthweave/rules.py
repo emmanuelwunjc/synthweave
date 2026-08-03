@@ -169,6 +169,10 @@ class Uniform(_BaseRule):
     low: float
     high: float
 
+    def __post_init__(self):
+        if self.high <= self.low:
+            raise ValueError(f"Uniform needs high > low, got low={self.low} high={self.high}")
+
     def draw(self, keys, *, seed, salt, frame=None):
         return self.low + _hash.unit(keys, seed, salt) * (self.high - self.low)
 

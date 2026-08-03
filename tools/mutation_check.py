@@ -352,6 +352,36 @@ MUTATIONS = [
         "                chunk[column] = _restore_dtype(values, original_dtype)",
         "                chunk[column] = values",
     ),
+    (
+        "#45.1a duplicate table carry names are rejected",
+        "src/synthweave/validation.py",
+        '    _check_unique(list(table.carry), f"{where} carried attribute")',
+        "    pass",
+    ),
+    (
+        "#45.1b duplicate table identifier names are rejected",
+        "src/synthweave/validation.py",
+        '    _check_unique(list(table.identifiers), f"{where} identifier")',
+        "    pass",
+    ),
+    (
+        "#45.2a identifier-width fix drops the erroneous extra digit",
+        "src/synthweave/validation.py",
+        "    needed = len(str(population * population // 2))",
+        "    needed = len(str(population * population // 2)) + 1",
+    ),
+    (
+        "#45.2b a population past the digit limit says so instead of recommending it",
+        "src/synthweave/validation.py",
+        "    if needed > MAX_DIGITS:",
+        "    if False:",
+    ),
+    (
+        "#45.3 Uniform rejects high <= low instead of silently descending",
+        "src/synthweave/rules.py",
+        "        if self.high <= self.low:",
+        "        if False:",
+    ),
 ]
 
 
