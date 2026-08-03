@@ -368,3 +368,88 @@ def resolve_order(rules: Mapping[str, Rule], available: Iterable[str] = ()) -> l
     for name in rules:
         visit(name, ())
     return order
+
+
+class RuleConformanceError(AssertionError):
+    """A custom Rule broke one of the two contracts `check_rule` verifies."""
+
+
+def check_rule(
+    rule: Rule,
+    *,
+    n: int = 64,
+    seed: int | str = 0,
+    salt: str = "check_rule",
+    frame: pd.DataFrame | None = None,
+) -> None:
+    """Verify a custom `Rule` honours its two contracts.
+
+    `Rule.draw`'s docstring promises "identical keys must yield identical
+    values" regardless of when or in what chunk they are drawn. Nothing
+    checks that promise today: `Rule` is a `runtime_checkable` Protocol
+    matched on `draw`/`depends_on` alone, so a rule keyed on row position
+    (`np.arange(len(keys))`) or reaching for `random.random()` passes
+    `isinstance` and only breaks determinism once a run is already chunked.
+
+    Draws a small key array three ways and requires the same values back:
+    called twice (determinism), with the keys shuffled (values must follow
+    the key, not its position), and split into two calls concatenated
+    (chunk invariance). Raises `RuleConformanceError` naming which contract
+    broke and showing the first differing keys and values, or returns
+    `None` if the rule passes all three.
+
+    `frame` is only needed for a rule that depends on other columns (e.g.
+    `Conditional`); it is sliced alongside `keys` for the shuffled and split
+    calls, so its rows must line up with `keys` positionally.
+    """
+    keys = np.array([f"check_rule:{i}" for i in range(n)], dtype=object)
+
+    baseline = rule.draw(keys, seed=seed, salt=salt, frame=frame)
+
+    repeat = rule.draw(keys, seed=seed, salt=salt, frame=frame)
+    _assert_same_values(
+        keys, baseline, repeat, "calling draw() twice with identical input gave different "
+        "values back (the rule is not deterministic, e.g. it reaches for random state)"
+    )
+
+    order = np.arange(n)[::-1]
+    shuffled_keys = keys[order]
+    shuffled = rule.draw(shuffled_keys, seed=seed, salt=salt, frame=_reorder_frame(frame, order))
+    by_key = dict(zip(keys, baseline))
+    expected = np.array([by_key[k] for k in shuffled_keys], dtype=baseline.dtype)
+    _assert_same_values(
+        shuffled_keys, expected, shuffled, "shuffling the key array changed a key's value "
+        "(the rule depends on position or order, not on the key itself)"
+    )
+
+    split = n // 2
+    first = rule.draw(keys[:split], seed=seed, salt=salt, frame=_reorder_frame(frame, slice(0, split)))
+    second = rule.draw(
+        keys[split:], seed=seed, salt=salt, frame=_reorder_frame(frame, slice(split, None))
+    )
+    combined = np.concatenate([first, second])
+    _assert_same_values(
+        keys, baseline, combined, "splitting the keys across two calls changed a value "
+        "(the rule is not chunk invariant, e.g. it reads chunk-level state)"
+    )
+
+
+def _reorder_frame(frame, index):
+    return None if frame is None else frame.iloc[index].reset_index(drop=True)
+
+
+def _assert_same_values(keys, expected, actual, reason: str) -> None:
+    mismatched = [
+        (k, e, a) for k, e, a in zip(keys, expected, actual) if not _values_equal(e, a)
+    ]
+    if mismatched:
+        shown = ", ".join(f"{k!r}: expected {e!r}, got {a!r}" for k, e, a in mismatched[:3])
+        raise RuleConformanceError(
+            f"{reason}. {len(mismatched)} of {len(keys)} key(s) differed, e.g. {shown}"
+        )
+
+
+def _values_equal(a, b) -> bool:
+    if isinstance(a, float) and isinstance(b, float) and np.isnan(a) and np.isnan(b):
+        return True
+    return a == b

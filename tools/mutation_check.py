@@ -400,6 +400,24 @@ MUTATIONS = [
         "                    train = train.iloc[:cap]",
         "                    keys = np.asarray(train.index, dtype=str).astype(object)\n                    pick = _hash.unit(keys, ctx.seed, f\"fitsample\\x00{table.name}\") < (cap / len(train))\n                    train = train.loc[pick]",
     ),
+    (
+        "#64 check_rule catches a non-deterministic rule",
+        "src/synthweave/rules.py",
+        '    repeat = rule.draw(keys, seed=seed, salt=salt, frame=frame)\n    _assert_same_values(\n        keys, baseline, repeat, "calling draw() twice with identical input gave different "\n        "values back (the rule is not deterministic, e.g. it reaches for random state)"\n    )',
+        "    pass",
+    ),
+    (
+        "#64 check_rule catches a position-keyed rule via a shuffled key array",
+        "src/synthweave/rules.py",
+        "    order = np.arange(n)[::-1]",
+        "    order = np.arange(n)",
+    ),
+    (
+        "#64 check_rule catches a chunk-size-dependent rule via a split call",
+        "src/synthweave/rules.py",
+        '    combined = np.concatenate([first, second])\n    _assert_same_values(\n        keys, baseline, combined, "splitting the keys across two calls changed a value "\n        "(the rule is not chunk invariant, e.g. it reads chunk-level state)"\n    )',
+        "    pass",
+    ),
 ]
 
 

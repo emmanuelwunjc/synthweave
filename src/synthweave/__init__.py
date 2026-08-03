@@ -66,8 +66,10 @@ from .rules import (
     Integer,
     Normal,
     Rule,
+    RuleConformanceError,
     Sequential,
     Uniform,
+    check_rule,
 )
 from .schema import Entity, Identifier, PerEntity, PerEvent, PerPeriod, Schema, Table
 from .stages.generate import RuleGenerator
@@ -100,7 +102,7 @@ __all__ = [
     "PerEntity", "PerPeriod", "PerEvent",
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
-    "Conditional", "Sequential",
+    "Conditional", "Sequential", "check_rule", "RuleConformanceError",
     # pipeline
     "Pipeline", "PipelineResult", "RunContext",
     # fidelity
