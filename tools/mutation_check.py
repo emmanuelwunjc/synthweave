@@ -376,6 +376,12 @@ MUTATIONS = [
         "    if needed > MAX_DIGITS:",
         "    if False:",
     ),
+    (
+        "#45.3 Uniform rejects high <= low instead of silently descending",
+        "src/synthweave/rules.py",
+        "        if self.high <= self.low:",
+        "        if False:",
+    ),
 ]
 
 

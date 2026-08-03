@@ -460,6 +460,13 @@ def test_a_table_asking_for_the_same_identifier_twice_is_rejected(people):
         sw.Pipeline(sw.Schema(entities=[people], tables=[table], seed=1))
 
 
+def test_uniform_with_high_not_above_low_is_rejected():
+    """Integer raises via _hash.integers on the same condition; Uniform did
+    not, and silently returned values descending into (high, low] instead."""
+    with pytest.raises(ValueError, match="high > low"):
+        sw.Uniform(10, 5)
+
+
 def test_an_unknown_entity_is_rejected(people):
     table = sw.Table("bad", grain=sw.PerEntity("ghost"))
     with pytest.raises(sw.SchemaError, match="ghost"):
