@@ -125,9 +125,18 @@ def test_the_same_identifier_links_across_tables(schema):
 
 
 def test_identifier_kinds_are_independent(schema):
-    """A person's two identifiers must not be derivable from each other."""
+    """A person's two identifiers must not be derivable from each other.
+
+    Comparing suffixes for inequality would pass even for `tax_id =
+    student_id + 1`: the two numeric parts almost never land on the exact
+    same digits, yet one is trivially derivable from the other. Checking
+    correlation between the two numeric sequences catches a fixed
+    relationship like that, not just literal equality.
+    """
     roster = sw.Pipeline(schema).run()["roster"]
-    assert (roster["student_id"].str[3:] != roster["tax_id"].str[3:]).all()
+    student_nums = roster["student_id"].str[3:].astype(int)
+    tax_nums = roster["tax_id"].str[3:].astype(int)
+    assert abs(student_nums.corr(tax_nums)) < 0.1
 
 
 def test_identifiers_are_unique_per_entity(schema):
