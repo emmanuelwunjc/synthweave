@@ -622,6 +622,37 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
     assert rates["College"] > rates["HS"] + 0.2
 
 
+def test_two_joints_sharing_a_column_are_rejected():
+    """training_frame applies joints in order; each overwrites its columns.
+
+    Both joints below are perfect 1:1 links and both agree with the
+    declared marginal for 'a', so #37's marginal-vs-joint check has nothing
+    to flag. But applying ('a', 'c') after ('a', 'b') overwrites 'a' with an
+    independently drawn value, silently destroying the correlation the
+    first joint was cited for.
+    """
+    with pytest.raises(ValueError, match="both name 'a'"):
+        sw.Prior(
+            marginals={"a": {"x": 0.5, "y": 0.5}},
+            joints={
+                ("a", "b"): {("x", "p"): 0.5, ("y", "q"): 0.5},
+                ("a", "c"): {("x", "r"): 0.5, ("y", "s"): 0.5},
+            },
+        )
+
+
+def test_joints_over_disjoint_columns_are_fine():
+    """The check must not cost the ordinary case it guards."""
+    prior = sw.Prior(
+        marginals={"a": {"x": 0.5, "y": 0.5}},
+        joints={
+            ("a", "b"): {("x", "p"): 0.5, ("y", "q"): 0.5},
+            ("c", "d"): {("m", "1"): 0.5, ("n", "2"): 0.5},
+        },
+    )
+    assert len(prior.joints) == 2
+
+
 # --- the numeric heuristic --------------------------------------------------
 
 

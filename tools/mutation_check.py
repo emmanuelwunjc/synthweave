@@ -352,6 +352,12 @@ MUTATIONS = [
         "                chunk[column] = _restore_dtype(values, original_dtype)",
         "                chunk[column] = values",
     ),
+    (
+        "#46.1 two joints sharing a column are rejected",
+        "src/synthweave/stages/synthesize.py",
+        "        _check_joints_do_not_share_a_column(self.joints)\n        _check_joints_agree_with_marginals(self.marginals, self.joints)",
+        "        _check_joints_agree_with_marginals(self.marginals, self.joints)",
+    ),
 ]
 
 

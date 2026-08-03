@@ -124,6 +124,36 @@ def _check_joints_agree_with_marginals(
                 )
 
 
+def _check_joints_do_not_share_a_column(
+    joints: Mapping[tuple[str, str], Mapping[tuple[Any, Any], float]],
+) -> None:
+    """Raise when two joints both name the same column.
+
+    `training_frame` applies joints in dict order, and each one overwrites
+    both of the columns it spans. Two joints sharing a column can agree with
+    every declared marginal and still not both survive: whichever runs last
+    wins the shared column outright, and the row-level link the earlier
+    joint was cited for is gone, replaced by an independently drawn value
+    that only happens to share the same marginal shares. Nothing before this
+    caught it, because `_check_joints_agree_with_marginals` only compares a
+    joint against a *marginal*, never a joint against another joint.
+    """
+    seen: dict[str, tuple[str, str]] = {}
+    for pair in joints:
+        for column in pair:
+            earlier = seen.get(column)
+            if earlier is not None and earlier != pair:
+                raise ValueError(
+                    f"Prior: joints {earlier!r} and {pair!r} both name {column!r}. "
+                    "Applying both would silently discard whichever ran first: "
+                    "training_frame overwrites a joint's columns in full, so the "
+                    "row-level link the earlier joint declared cannot survive. "
+                    "Combine them into a single joint over every column you need "
+                    "correlated together, or drop one."
+                )
+            seen[column] = pair
+
+
 @register("structure", "prior")
 class Prior:
     """Structure from published aggregates rather than rows.
@@ -150,6 +180,7 @@ class Prior:
         self.marginals = marginals
         self.joints = joints or {}
         self.rows = rows
+        _check_joints_do_not_share_a_column(self.joints)
         _check_joints_agree_with_marginals(self.marginals, self.joints)
 
     def training_frame(self, table: Table, ctx: RunContext) -> pd.DataFrame:
