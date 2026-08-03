@@ -190,7 +190,16 @@ class Prior:
         for column, dist in self.marginals.items():
             values = np.array(list(dist.keys()), dtype=object)
             weights = np.array(list(dist.values()), dtype=float)
-            frame[column] = _hash.pick(keys, ctx.seed, f"prior\x00{column}", values, weights)
+            picked = _hash.pick(keys, ctx.seed, f"prior\x00{column}", values, weights)
+            # `pick` always returns object, since it must support arbitrary
+            # hashable keys (strings, tuples). A marginal declared over
+            # numbers -- income, age, the obvious `Prior` use case -- gets
+            # its real dtype back so `_FittedCART._numeric` fits it as a
+            # number rather than guessing a classifier from an object
+            # column. A marginal over strings or anything else stays
+            # object, same as every other categorical column here.
+            natural = np.asarray(list(dist.keys())).dtype
+            frame[column] = picked.astype(natural) if natural.kind in "iuf" else picked
 
         # A joint overrides the two marginals it spans, so declared pairwise
         # structure survives into the training frame.

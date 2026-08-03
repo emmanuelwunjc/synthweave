@@ -117,6 +117,25 @@ def test_prior_structure_comes_from_published_aggregates(people):
     assert 0.60 < share_own < 0.70
 
 
+def test_a_numeric_prior_marginal_stays_numeric(people):
+    """#46.2: `_hash.pick` always returns object, so a `Prior` marginal
+    declared over numbers -- income, age, the obvious `Prior` use case --
+    came back as an object column, and `_FittedCART._numeric` fits a
+    classifier rather than a regressor on an object dtype.
+    """
+    table = sw.Table("survey", grain=sw.PerEntity("person"), columns={"income": sw.Integer(0, 1)})
+    out = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=11),
+        synthesizer=sw.CARTSynthesizer(
+            ["income"],
+            tables=["survey"],
+            structure=sw.Prior(marginals={"income": {25_000: 0.5, 75_000: 0.5}}, rows=2_000),
+        ),
+    ).run()["survey"]
+
+    assert pd.api.types.is_numeric_dtype(out["income"].dtype)
+
+
 def test_a_structure_source_missing_a_column_fails_loudly(people):
     table = sw.Table("t", grain=sw.PerEntity("person"), columns={"x": sw.Constant(1)})
     real = pd.DataFrame({"something_else": [1, 2, 3]})

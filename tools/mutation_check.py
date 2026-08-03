@@ -358,6 +358,12 @@ MUTATIONS = [
         "        _check_joints_do_not_share_a_column(self.joints)\n        _check_joints_agree_with_marginals(self.marginals, self.joints)",
         "        _check_joints_agree_with_marginals(self.marginals, self.joints)",
     ),
+    (
+        "#46.2 a numeric Prior marginal carries its natural dtype",
+        "src/synthweave/stages/synthesize.py",
+        "            frame[column] = picked.astype(natural) if natural.kind in \"iuf\" else picked",
+        "            frame[column] = picked",
+    ),
 ]
 
 
