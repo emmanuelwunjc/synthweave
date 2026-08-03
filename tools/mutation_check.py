@@ -364,6 +364,12 @@ MUTATIONS = [
         "            frame[column] = picked.astype(natural) if natural.kind in \"iuf\" else picked",
         "            frame[column] = picked",
     ),
+    (
+        "#46.3 fit_cap holds for a supplied structure source across seeds",
+        "src/synthweave/stages/synthesize.py",
+        "                    train = train.iloc[:cap]",
+        "                    keys = np.asarray(train.index, dtype=str).astype(object)\n                    pick = _hash.unit(keys, ctx.seed, f\"fitsample\\x00{table.name}\") < (cap / len(train))\n                    train = train.loc[pick]",
+    ),
 ]
 
 

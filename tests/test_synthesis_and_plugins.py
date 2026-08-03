@@ -266,6 +266,39 @@ def test_above_the_cap_the_fit_is_capped(schema):
     assert result.metadata["wages"]["synthesize"]["fit_rows"] == 250
 
 
+def test_fit_cap_holds_across_seeds_for_a_supplied_structure_source(people):
+    """#46.3: the second sampling pass was a no-op.
+
+    Pass 1 keys by position (`np.arange(len(train)).astype(str)`); a
+    `RangeIndex` survives a boolean mask with its original labels, so pass
+    2's `train.index` keys were identical strings under the identical seed
+    and salt as pass 1. Pass 2's threshold (`cap / len(train)`) is only
+    looser than pass 1's, so every survivor of pass 1 automatically passed
+    pass 2 too, and the cap was exceeded roughly half the time across seeds.
+    `Declared` structure goes through `buffer_to`, which already truncates
+    exactly and so never exercised this path; a supplied structure source
+    (`Empirical` here) does.
+    """
+    real = pd.DataFrame({"education": ["HS", "College"] * 1050, "wage": list(range(2100))})
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"wage": sw.Integer(0, 100)}
+    )
+    for seed in range(30):
+        schema = sw.Schema(entities=[people], tables=[table], seed=seed)
+        result = sw.Pipeline(
+            schema,
+            synthesizer=sw.CARTSynthesizer(
+                ["wage"],
+                tables=["t"],
+                predictors=["education"],
+                structure=sw.Empirical(real),
+                fit_cap=1000,
+            ),
+        ).run()
+        fit_rows = result.metadata["t"]["synthesize"]["fit_rows"]
+        assert fit_rows <= 1000, f"seed {seed}: fit_rows={fit_rows} exceeds the cap"
+
+
 def test_a_table_outside_the_synthesizer_scope_passes_through(schema):
     """The roster has no wage column, so naming only wages must leave it alone."""
     plain = sw.Pipeline(schema).run()["roster"]

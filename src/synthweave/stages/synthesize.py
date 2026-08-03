@@ -427,12 +427,19 @@ class CARTSynthesizer:
                 keys = np.arange(len(train)).astype(str).astype(object)
                 pick = _hash.unit(keys, ctx.seed, f"fitsample\x00{table.name}") < (cap / len(train))
                 train = train.loc[pick]
-
-        if len(train) > cap:
-            keys = np.asarray(train.index, dtype=str).astype(object)
-            pick = _hash.unit(keys, ctx.seed, f"fitsample\x00{table.name}") < (cap / len(train))
-            train = train.loc[pick]
-            sampled = True
+                if len(train) > cap:
+                    # The draw above targets `cap` in expectation but can
+                    # overshoot it. A `RangeIndex` survives a boolean mask
+                    # with its original positional labels, so keying a
+                    # second Bernoulli pass by `train.index` reused the
+                    # exact same keys, seed, and salt as the pass above and
+                    # reproduced its exact same draw -- a strictly looser
+                    # threshold applied to an identical draw keeps every
+                    # survivor, making that "second pass" a no-op.
+                    # Truncating by position instead, the same exact-cap
+                    # discipline `buffer_to` already uses for the
+                    # no-structure path, guarantees the cap here too.
+                    train = train.iloc[:cap]
 
         missing = [c for c in self.columns + self.predictors if c not in train.columns]
         if missing:
