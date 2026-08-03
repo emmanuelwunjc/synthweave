@@ -716,6 +716,9 @@ def test_a_digit_count_past_the_hash_width_is_rejected():
 
 
 def test_a_table_that_emits_no_rows_still_has_its_columns():
+    """Column order matters too: it is what `run_to(format="csv")` writes as
+    the header, so a set comparison would miss a column landing in the wrong
+    position even though its name is still present."""
     person = sw.Entity(
         "person",
         count=5,
@@ -729,10 +732,16 @@ def test_a_table_that_emits_no_rows_still_has_its_columns():
         identifiers=["tax_id"],
         coverage=0.001,
     )
-    empty = sw.Pipeline(sw.Schema(entities=[person], tables=[table], seed=4)).run()["t"]
+    schema = sw.Schema(entities=[person], tables=[table], seed=4)
+    empty = sw.Pipeline(schema).run()["t"]
+
+    non_empty_table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], identifiers=["tax_id"]
+    )
+    non_empty = sw.Pipeline(sw.Schema(entities=[person], tables=[non_empty_table], seed=4)).run()["t"]
 
     assert len(empty) == 0
-    assert set(empty.columns) == {"education", "tax_id"}
+    assert list(empty.columns) == list(non_empty.columns)
 
 
 # --- edge cases that turned out to be sound ---------------------------------
