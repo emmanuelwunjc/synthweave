@@ -419,6 +419,85 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#89.1 two attributes sharing one ACS variable both keep a column",
+        "src/synthweave/mode.py",
+        "            self._fetched = pd.DataFrame(\n                {name: fetched[variable] for name, variable in self._variables.items()}\n            )",
+        "            self._fetched = fetched.rename(\n                columns={variable: name for name, variable in self._variables.items()}\n            )",
+    ),
+    (
+        "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
+        "src/synthweave/mode.py",
+        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
+        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+    ),
+    (
+        "#89.3 scope epsilon is validated, not clamped (mode level)",
+        "src/synthweave/mode.py",
+        '        _check_epsilon(epsilon, "scope")\n',
+        "",
+    ),
+    (
+        "#89.4 scope epsilon is validated, not clamped (per attribute)",
+        "src/synthweave/mode.py",
+        '        if epsilon is not None:\n            _check_epsilon(epsilon, f"attribute {name!r}")\n        self._variables[name] = variable',
+        "        self._variables[name] = variable",
+    ),
+    (
+        "#88 non-positive real_data epsilon rejected instead of clamped to 0.01",
+        "src/synthweave/mode.py",
+        '    if epsilon <= 0:\n        raise ValueError(f"{where}: epsilon must be positive, got {epsilon!r}")',
+        "    pass",
+    ),
+    (
+        "#88 a stray attribute kwarg in real_data mode is named, not a bare TypeError",
+        "src/synthweave/mode.py",
+        """        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: real_data mode takes only epsilon, got "
+                f"{sorted(kwargs)}; the column's distribution comes from the "
+                "donor frame, not from a declared rule"
+            )
+""",
+        "",
+    ),
+    (
+        "#87 mode noise resolves against the schema's expanded carry (carry=*)",
+        "src/synthweave/mode.py",
+        "            for column_name in list(table.carry) + list(table.columns):",
+        """            for column_name in list(table.columns) + (
+                list(table.carry) if isinstance(table.carry, list) else []
+            ):""",
+    ),
+    (
+        "#87 a mode noise rate declared after table() still reaches the table",
+        "src/synthweave/mode.py",
+        """        return Table(
+            name,
+            grain=grain,
+            columns=columns or {},
+            carry=carry,
+            identifiers=identifiers or (),
+            coverage=coverage,
+        )""",
+        """        # Reverted: freeze the rates known now, which is what resolving
+        # the noise map inside table() amounted to.
+        known = set(self._noise_kwargs)
+
+        class _AsOfNow(dict):
+            def get(self, key, default=None):
+                return dict.get(self, key, default) if key in known else default
+
+        self._noise_kwargs = _AsOfNow(self._noise_kwargs)
+        return Table(
+            name,
+            grain=grain,
+            columns=columns or {},
+            carry=carry,
+            identifiers=identifiers or (),
+            coverage=coverage,
+        )""",
+    ),
+    (
         "#48 unregister actually removes the entry",
         "src/synthweave/registry.py",
         "    del table[name]",

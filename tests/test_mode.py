@@ -17,6 +17,7 @@ import pytest
 
 import invariants
 import synthweave as sw
+from synthweave.mode import _cart_knobs
 
 
 # --- construction -------------------------------------------------------
@@ -54,6 +55,18 @@ def test_normal_missing_sd_raises_naming_it():
         m.attribute("income", distribution="normal", mean=1)
 
 
+def test_normal_missing_mean_raises_naming_it():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="mean"):
+        m.attribute("income", distribution="normal", sd=1)
+
+
+def test_an_unknown_kwarg_is_rejected_rather_than_dropped():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="typo"):
+        m.attribute("income", min=0, max=1, typo=0.1)
+
+
 # --- attribute(): noise-kwarg bookkeeping --------------------------------
 
 
@@ -84,15 +97,45 @@ def test_table_returns_a_real_table():
 
 def test_schema_run_produces_null_values_near_the_configured_missing_rate():
     m = sw.Mode.metadata()
-    m.attribute("income", min=0, max=100, missing_rate=0.3)
-    person = m.entity(
-        "person", count=20_000, attributes={"income": m.attribute("income", min=0, max=100)}
-    )
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
     table = m.table("records", grain="person", carry=["income"])
 
     result = m.schema(entities=[person], tables=[table], seed=42).run()
 
     assert 0.29 < result["records"]["income"].isna().mean() < 0.31
+
+
+def test_missing_rate_reaches_a_column_carried_by_wildcard():
+    m = sw.Mode.metadata()
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+    table = m.table("records", grain="person", carry="*")
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_missing_rate_reaches_a_column_declared_after_the_table():
+    m = sw.Mode.metadata()
+    table = m.table("records", grain="person", carry=["income"])
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_a_noise_rate_matching_no_column_anywhere_raises():
+    m = sw.Mode.metadata()
+    rule = m.attribute("incme", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=10, attributes={"income": rule})
+    table = m.table("records", grain="person", carry=["income"])
+
+    with pytest.raises(ValueError, match="would never be applied"):
+        m.schema(entities=[person], tables=[table], seed=1)
 
 
 def test_schema_run_matches_hand_built_pipeline_for_the_same_seed():
@@ -173,6 +216,31 @@ def test_real_datas_docstring_disclaims_differential_privacy():
     assert "differential privacy" in sw.Mode.real_data.__doc__.lower()
 
 
+# --- sw.Mode.real_data(): the epsilon -> CART knob mapping ----------------
+#
+# `Mode.real_data`'s docstring points callers at `_cart_knobs` as the source
+# of truth for the mapping, so the numbers it names have to be the numbers it
+# produces. These pin both halves so neither can drift alone.
+
+
+def test_cart_knobs_at_the_epsilon_ceiling_are_pinned():
+    assert _cart_knobs(5.0) == {
+        "max_depth": None,
+        "min_samples_leaf": 20,
+        "fit_cap": 200_000,
+    }
+
+
+def test_epsilon_past_the_ceiling_produces_the_ceiling_knobs():
+    assert _cart_knobs(10.0) == _cart_knobs(5.0)
+
+
+def test_cart_knobs_docstring_names_the_values_it_actually_produces():
+    doc = _cart_knobs.__doc__
+    for fragment in ("max_depth=None", "min_samples_leaf=20", "fit_cap=DEFAULT_FIT_CAP"):
+        assert fragment in doc
+
+
 # --- sw.Mode.real_data(): attribute()'s epsilon dispatch -------------------
 
 
@@ -186,6 +254,28 @@ def test_attribute_epsilon_overrides_the_mode_level_default(donor_frame):
     m = sw.Mode.real_data(source=donor_frame, epsilon=0.75)
     m.attribute("wage", epsilon=0.5)
     assert m._real_data_epsilon["wage"] == 0.5
+
+
+# --- sw.Mode.real_data(): rejecting a caller error at the caller's line ----
+
+
+@pytest.mark.parametrize("bad", [0, -1, -0.5])
+def test_real_data_rejects_a_non_positive_epsilon(donor_frame, bad):
+    with pytest.raises(ValueError, match=re.escape(repr(bad))):
+        sw.Mode.real_data(source=donor_frame, epsilon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_attribute_rejects_a_non_positive_epsilon_naming_the_attribute(donor_frame, bad):
+    m = sw.Mode.real_data(source=donor_frame)
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage", epsilon=bad)
+
+
+def test_attribute_rejects_an_unknown_kwarg_naming_the_attribute(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame)
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage", min=0, max=1)
 
 
 # --- sw.Mode.real_data(): one CARTSynthesizer per distinct epsilon ---------
@@ -261,16 +351,108 @@ def test_attribute_without_variable_raises_naming_it():
         m.attribute("wage")
 
 
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_epsilon(bad):
+    """Scope reaches the same clamp real_data does, so it needs the same guard.
+
+    `_cart_knobs` turns 0 or -1 into 0.01 and hands back the most generalized
+    column the mapping can produce. That is a plausible-looking result for
+    what is really a typo, and it is worse here than in real_data mode: the
+    donor rows are real Census respondents, so a silently mangled epsilon is
+    a silently wrong disclosure posture.
+    """
+    with pytest.raises(ValueError, match="positive"):
+        sw.Mode.scope(area_code="NY", epsilon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_per_attribute_epsilon(bad):
+    """The per-column override reaches the same clamp, so it gets the same guard."""
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="positive"):
+        m.attribute("wage", variable="PINCP", epsilon=bad)
+
+
 def test_attribute_with_variable_registers_it():
     m = sw.Mode.scope(area_code="NY")
     m.attribute("wage", variable="PINCP")
     assert m._variables["wage"] == "PINCP"
 
 
+def test_two_attributes_can_share_one_acs_variable():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=50, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        result = m.schema(entities=[person], tables=[table], seed=5).run()
+
+    donor_wages = {20_000 + i * 137 for i in range(200)}
+    assert set(result["roster"]["wage"]) <= donor_wages
+    assert set(result["roster"]["earnings"]) <= donor_wages
+
+
+def test_a_shared_acs_variable_is_requested_once():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=10, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        m.schema(entities=[person], tables=[table], seed=5).run()
+
+    requested = urlopen.call_args.args[0]
+    assert requested.count("PINCP") == 1
+
+
+def test_scope_generalizes_the_fetched_rows_by_epsilon():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP")
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    # epsilon 0.5 asks for a shallow tree, not CART's unbounded default.
+    assert synthesizer.max_depth == 2
+
+
+def test_scope_attribute_epsilon_overrides_the_mode_level_default():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP", epsilon=1.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert synthesizer.max_depth == 4
+
+
+def test_scope_attributes_at_different_epsilons_get_two_synthesizers():
+    m = sw.Mode.scope(area_code="NY")
+    m.attribute("wage", variable="PINCP", epsilon=0.5)
+    m.attribute("age", variable="AGEP", epsilon=2.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert not isinstance(synthesizer, sw.CARTSynthesizer)
+    assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
+    assert {s.max_depth for s in synthesizer.synthesizers} == {2, 8}
+
+
 def test_scopes_docstring_first_sentence_states_state_level_only():
-    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0].lower()
-    assert "state" in first_sentence
-    assert "only" in first_sentence
+    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0]
+    assert "state-level ACS geography only" in first_sentence
+
+
+def test_scopes_docstring_disclaims_differential_privacy():
+    assert "differential privacy" in sw.Mode.scope.__doc__.lower()
 
 
 def test_schema_run_calls_fetch_pums_once_for_every_attribute_combined():
@@ -298,6 +480,30 @@ def test_a_second_run_on_the_same_schema_does_not_refetch():
         first_count = urlopen.call_count
         schema.run()
         assert urlopen.call_count == first_count
+
+
+def test_schema_defers_the_fetch_until_run():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        schema = m.schema(entities=[person], tables=[table], seed=5)
+        assert urlopen.call_count == 0
+        schema.run()
+        assert urlopen.call_count == 1
+
+
+def test_an_unrecognized_area_code_raises_on_run_not_on_schema():
+    m = sw.Mode.scope(area_code="Nowhere")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    schema = m.schema(entities=[person], tables=[table], seed=5)
+    with pytest.raises(ValueError, match="Nowhere"):
+        schema.run()
 
 
 def test_schema_run_synthesizes_from_real_acs_rows():
