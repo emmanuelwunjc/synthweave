@@ -26,12 +26,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import pandas as pd
+
+from ._fetch import fetch_url
 
 _API_BASE = "https://api.census.gov/data"
 _KEY_SIGNUP_URL = "https://api.census.gov/data/key_signup.html"
@@ -181,19 +181,7 @@ def _cache_path(cache_dir: str | Path | None, url: str) -> Path | None:
 
 
 def _request(url_with_key: str, url_for_errors: str) -> list[list[str]]:
-    try:
-        with urllib.request.urlopen(url_with_key, timeout=30) as response:
-            status = response.status
-            body = response.read()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(
-            f"ACS PUMS request failed with HTTP {e.code}: {url_for_errors}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"ACS PUMS request failed: {url_for_errors} ({e.reason})") from e
-
-    if status != 200:
-        raise RuntimeError(f"ACS PUMS request failed with HTTP {status}: {url_for_errors}")
+    body = fetch_url(url_for_errors, timeout=30, label="ACS PUMS", request_url=url_with_key)
     try:
         return json.loads(body)
     except json.JSONDecodeError as e:

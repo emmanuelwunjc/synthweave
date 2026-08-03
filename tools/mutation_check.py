@@ -235,8 +235,8 @@ MUTATIONS = [
     (
         "#16 SSA cache filename distinguishes the source",
         "src/synthweave/connectors/ssa_names.py",
-        "    cache_path = None if cache_dir is None else Path(cache_dir) / _cache_filename(source)",
-        '    cache_path = None if cache_dir is None else Path(cache_dir) / "ssa_names.csv"',
+        "        _cache_filename(source),",
+        '        "ssa_names.csv",',
     ),
     (
         "#13 namedtuple refused rather than flattened into a Choice",

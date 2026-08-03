@@ -38,8 +38,6 @@ default, so that alignment is explicit rather than silently assumed:
 from __future__ import annotations
 
 import io
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Mapping
@@ -48,6 +46,8 @@ import numpy as np
 import pandas as pd
 
 from .. import _hash
+from ._fetch import cached_dataframe
+from ._fetch import fetch_url as _fetch_url
 
 _URL = "https://www2.census.gov/topics/genealogy/2010surnames/names.zip"
 _MEMBER = "Names_2010Census.csv"
@@ -127,31 +127,11 @@ class Surname:
 
 def _surname_data(cache_dir: str | Path | None) -> pd.DataFrame:
     memo_key = "<none>" if cache_dir is None else str(Path(cache_dir))
-    if memo_key in _cache:
-        return _cache[memo_key]
-
-    cache_path = None if cache_dir is None else Path(cache_dir) / "surnames.csv"
-    if cache_path is not None and cache_path.exists():
-        frame = pd.read_csv(cache_path)
-        _cache[memo_key] = frame
-        return frame
-
-    frame = _fetch_and_parse()
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(cache_path, index=False)
-    _cache[memo_key] = frame
-    return frame
+    return cached_dataframe(_cache, memo_key, cache_dir, "surnames.csv", _fetch_and_parse)
 
 
 def _fetch_and_parse() -> pd.DataFrame:
-    try:
-        with urllib.request.urlopen(_URL, timeout=60) as response:
-            if response.status != 200:
-                raise RuntimeError(f"Census surnames request failed with HTTP {response.status}: {_URL}")
-            body = response.read()
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Census surnames request failed: {_URL} ({e})") from e
+    body = _fetch_url(_URL, timeout=60, label="Census surnames")
 
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         raw = archive.read(_MEMBER).decode("utf-8")
