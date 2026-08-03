@@ -117,6 +117,25 @@ def test_prior_structure_comes_from_published_aggregates(people):
     assert 0.60 < share_own < 0.70
 
 
+def test_a_numeric_prior_marginal_stays_numeric(people):
+    """#46.2: `_hash.pick` always returns object, so a `Prior` marginal
+    declared over numbers -- income, age, the obvious `Prior` use case --
+    came back as an object column, and `_FittedCART._numeric` fits a
+    classifier rather than a regressor on an object dtype.
+    """
+    table = sw.Table("survey", grain=sw.PerEntity("person"), columns={"income": sw.Integer(0, 1)})
+    out = sw.Pipeline(
+        sw.Schema(entities=[people], tables=[table], seed=11),
+        synthesizer=sw.CARTSynthesizer(
+            ["income"],
+            tables=["survey"],
+            structure=sw.Prior(marginals={"income": {25_000: 0.5, 75_000: 0.5}}, rows=2_000),
+        ),
+    ).run()["survey"]
+
+    assert pd.api.types.is_numeric_dtype(out["income"].dtype)
+
+
 def test_a_structure_source_missing_a_column_fails_loudly(people):
     table = sw.Table("t", grain=sw.PerEntity("person"), columns={"x": sw.Constant(1)})
     real = pd.DataFrame({"something_else": [1, 2, 3]})
@@ -245,6 +264,39 @@ def test_above_the_cap_the_fit_is_capped(schema):
         ),
     ).run()
     assert result.metadata["wages"]["synthesize"]["fit_rows"] == 250
+
+
+def test_fit_cap_holds_across_seeds_for_a_supplied_structure_source(people):
+    """#46.3: the second sampling pass was a no-op.
+
+    Pass 1 keys by position (`np.arange(len(train)).astype(str)`); a
+    `RangeIndex` survives a boolean mask with its original labels, so pass
+    2's `train.index` keys were identical strings under the identical seed
+    and salt as pass 1. Pass 2's threshold (`cap / len(train)`) is only
+    looser than pass 1's, so every survivor of pass 1 automatically passed
+    pass 2 too, and the cap was exceeded roughly half the time across seeds.
+    `Declared` structure goes through `buffer_to`, which already truncates
+    exactly and so never exercised this path; a supplied structure source
+    (`Empirical` here) does.
+    """
+    real = pd.DataFrame({"education": ["HS", "College"] * 1050, "wage": list(range(2100))})
+    table = sw.Table(
+        "t", grain=sw.PerEntity("person"), carry=["education"], columns={"wage": sw.Integer(0, 100)}
+    )
+    for seed in range(30):
+        schema = sw.Schema(entities=[people], tables=[table], seed=seed)
+        result = sw.Pipeline(
+            schema,
+            synthesizer=sw.CARTSynthesizer(
+                ["wage"],
+                tables=["t"],
+                predictors=["education"],
+                structure=sw.Empirical(real),
+                fit_cap=1000,
+            ),
+        ).run()
+        fit_rows = result.metadata["t"]["synthesize"]["fit_rows"]
+        assert fit_rows <= 1000, f"seed {seed}: fit_rows={fit_rows} exceeds the cap"
 
 
 def test_a_table_outside_the_synthesizer_scope_passes_through(schema):
@@ -620,6 +672,37 @@ def test_a_joint_prior_shapes_the_relationship_it_declares():
 
     rates = result.groupby("education")["employed"].mean()
     assert rates["College"] > rates["HS"] + 0.2
+
+
+def test_two_joints_sharing_a_column_are_rejected():
+    """training_frame applies joints in order; each overwrites its columns.
+
+    Both joints below are perfect 1:1 links and both agree with the
+    declared marginal for 'a', so #37's marginal-vs-joint check has nothing
+    to flag. But applying ('a', 'c') after ('a', 'b') overwrites 'a' with an
+    independently drawn value, silently destroying the correlation the
+    first joint was cited for.
+    """
+    with pytest.raises(ValueError, match="both name 'a'"):
+        sw.Prior(
+            marginals={"a": {"x": 0.5, "y": 0.5}},
+            joints={
+                ("a", "b"): {("x", "p"): 0.5, ("y", "q"): 0.5},
+                ("a", "c"): {("x", "r"): 0.5, ("y", "s"): 0.5},
+            },
+        )
+
+
+def test_joints_over_disjoint_columns_are_fine():
+    """The check must not cost the ordinary case it guards."""
+    prior = sw.Prior(
+        marginals={"a": {"x": 0.5, "y": 0.5}},
+        joints={
+            ("a", "b"): {("x", "p"): 0.5, ("y", "q"): 0.5},
+            ("c", "d"): {("m", "1"): 0.5, ("n", "2"): 0.5},
+        },
+    )
+    assert len(prior.joints) == 2
 
 
 # --- the numeric heuristic --------------------------------------------------

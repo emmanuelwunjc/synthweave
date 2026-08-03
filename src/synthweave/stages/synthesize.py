@@ -124,6 +124,36 @@ def _check_joints_agree_with_marginals(
                 )
 
 
+def _check_joints_do_not_share_a_column(
+    joints: Mapping[tuple[str, str], Mapping[tuple[Any, Any], float]],
+) -> None:
+    """Raise when two joints both name the same column.
+
+    `training_frame` applies joints in dict order, and each one overwrites
+    both of the columns it spans. Two joints sharing a column can agree with
+    every declared marginal and still not both survive: whichever runs last
+    wins the shared column outright, and the row-level link the earlier
+    joint was cited for is gone, replaced by an independently drawn value
+    that only happens to share the same marginal shares. Nothing before this
+    caught it, because `_check_joints_agree_with_marginals` only compares a
+    joint against a *marginal*, never a joint against another joint.
+    """
+    seen: dict[str, tuple[str, str]] = {}
+    for pair in joints:
+        for column in pair:
+            earlier = seen.get(column)
+            if earlier is not None and earlier != pair:
+                raise ValueError(
+                    f"Prior: joints {earlier!r} and {pair!r} both name {column!r}. "
+                    "Applying both would silently discard whichever ran first: "
+                    "training_frame overwrites a joint's columns in full, so the "
+                    "row-level link the earlier joint declared cannot survive. "
+                    "Combine them into a single joint over every column you need "
+                    "correlated together, or drop one."
+                )
+            seen[column] = pair
+
+
 @register("structure", "prior")
 class Prior:
     """Structure from published aggregates rather than rows.
@@ -150,6 +180,7 @@ class Prior:
         self.marginals = marginals
         self.joints = joints or {}
         self.rows = rows
+        _check_joints_do_not_share_a_column(self.joints)
         _check_joints_agree_with_marginals(self.marginals, self.joints)
 
     def training_frame(self, table: Table, ctx: RunContext) -> pd.DataFrame:
@@ -159,7 +190,16 @@ class Prior:
         for column, dist in self.marginals.items():
             values = np.array(list(dist.keys()), dtype=object)
             weights = np.array(list(dist.values()), dtype=float)
-            frame[column] = _hash.pick(keys, ctx.seed, f"prior\x00{column}", values, weights)
+            picked = _hash.pick(keys, ctx.seed, f"prior\x00{column}", values, weights)
+            # `pick` always returns object, since it must support arbitrary
+            # hashable keys (strings, tuples). A marginal declared over
+            # numbers -- income, age, the obvious `Prior` use case -- gets
+            # its real dtype back so `_FittedCART._numeric` fits it as a
+            # number rather than guessing a classifier from an object
+            # column. A marginal over strings or anything else stays
+            # object, same as every other categorical column here.
+            natural = np.asarray(list(dist.keys())).dtype
+            frame[column] = picked.astype(natural) if natural.kind in "iuf" else picked
 
         # A joint overrides the two marginals it spans, so declared pairwise
         # structure survives into the training frame.
@@ -387,12 +427,19 @@ class CARTSynthesizer:
                 keys = np.arange(len(train)).astype(str).astype(object)
                 pick = _hash.unit(keys, ctx.seed, f"fitsample\x00{table.name}") < (cap / len(train))
                 train = train.loc[pick]
-
-        if len(train) > cap:
-            keys = np.asarray(train.index, dtype=str).astype(object)
-            pick = _hash.unit(keys, ctx.seed, f"fitsample\x00{table.name}") < (cap / len(train))
-            train = train.loc[pick]
-            sampled = True
+                if len(train) > cap:
+                    # The draw above targets `cap` in expectation but can
+                    # overshoot it. A `RangeIndex` survives a boolean mask
+                    # with its original positional labels, so keying a
+                    # second Bernoulli pass by `train.index` reused the
+                    # exact same keys, seed, and salt as the pass above and
+                    # reproduced its exact same draw -- a strictly looser
+                    # threshold applied to an identical draw keeps every
+                    # survivor, making that "second pass" a no-op.
+                    # Truncating by position instead, the same exact-cap
+                    # discipline `buffer_to` already uses for the
+                    # no-structure path, guarantees the cap here too.
+                    train = train.iloc[:cap]
 
         missing = [c for c in self.columns + self.predictors if c not in train.columns]
         if missing:
