@@ -285,6 +285,26 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     invariants.assert_chunk_invariant(schema, noiser=noiser)
 
 
+def test_a_rate_function_returning_the_wrong_length_fails_loudly(people):
+    """One rate per row, or an error. Broadcasting is the trap.
+
+    `np.asarray(fn(chunk))` accepts a length the chunk never had, and numpy
+    broadcasts a length-1 result over every row without complaint. That reads
+    as a working per-row rate while being a flat one, so the mistake survives
+    to the output rather than to a traceback.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+    noiser = sw.Noise({"survey": {"amount": [sw.Missing(lambda f: [0.3])]}})
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
+
+
 def test_a_row_varying_rate_outside_zero_to_one_fails_loudly(people):
     """A flat rate is range-checked at construction. A function cannot be.
 

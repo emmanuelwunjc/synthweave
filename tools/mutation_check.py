@@ -430,6 +430,14 @@ MUTATIONS = [
         "    registry._restore(snapshot)",
         "    pass",
     ),
+    (
+        "#47 a noise rate function must return one rate per row",
+        "src/synthweave/stages/noise.py",
+        """    if rates.shape != (len(chunk),):
+""",
+        """    if False:
+""",
+    ),
 ]
 
 
