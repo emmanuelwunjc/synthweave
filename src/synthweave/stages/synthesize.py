@@ -616,16 +616,26 @@ class _FittedCART:
             )
         return converted.to_numpy()
 
-    def _restore(self, column: str, values: np.ndarray) -> np.ndarray:
+    def _restore(
+        self, column: str, values: np.ndarray
+    ) -> np.ndarray | pd.api.extensions.ExtensionArray:
         """Give sampled donor values back the dtype the fit saw.
 
         The dtype comes from the model, never from the chunk, so every chunk
         lands on the same type. An int64 column cannot hold nulls in the first
         place, so a cast back to it cannot be asked to represent one.
+
+        `ndarray.astype` speaks numpy dtypes only, so a pandas ExtensionDtype
+        (`category`, nullable `Int64`, and every text column under pandas 3)
+        raises `TypeError` there rather than converting. Those go through
+        `pd.array`, which is the only constructor that takes an
+        `ExtensionDtype` and hands back the matching extension array.
         """
         dtype = self.dtypes.get(column)
         if dtype is None or dtype == object:
             return values
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            return pd.array(values, dtype=dtype)
         return values.astype(dtype)
 
     def _encode(self, frame: pd.DataFrame, features: Sequence[str]) -> np.ndarray:
