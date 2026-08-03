@@ -56,6 +56,7 @@ from importlib.metadata import version as _installed_version
 from ._hash import derive_id
 from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
+from .mode import Mode, ModeSchema
 from .pipeline import Pipeline, PipelineResult
 from .provenance import ProvenanceRecord, Tagged, cited, modeled, user
 from .registry import available, register, resolve, unregister
@@ -103,6 +104,8 @@ __all__ = [
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
+    # mode
+    "Mode", "ModeSchema",
     # pipeline
     "Pipeline", "PipelineResult", "RunContext",
     # fidelity
