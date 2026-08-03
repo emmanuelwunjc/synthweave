@@ -430,6 +430,19 @@ MUTATIONS = [
         "    registry._restore(snapshot)",
         "    pass",
     ),
+    (
+        "#62 I32 the ACS response is parsed before it is cached",
+        "src/synthweave/connectors/acs_pums.py",
+        """    frame = _to_frame(payload, variables, url)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return frame""",
+        """    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return _to_frame(payload, variables, url)""",
+    ),
 ]
 
 

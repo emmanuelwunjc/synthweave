@@ -135,14 +135,18 @@ def fetch_pums(
 
     cache_path = _cache_path(cache_dir, url)
     if cache_path is not None and cache_path.exists():
-        payload = json.loads(cache_path.read_text())
-    else:
-        payload = _request(f"{url}&key={key}", url)
-        if cache_path is not None:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(payload))
+        return _to_frame(json.loads(cache_path.read_text()), variables, url)
 
-    return _to_frame(payload, variables, url)
+    payload = _request(f"{url}&key={key}", url)
+    # Parse before caching. A 200 OK carrying something that is not a PUMS
+    # payload (the Census API answers some bad requests with a valid-JSON
+    # error object) used to be written to disk first, so the bad response was
+    # cached permanently and every later call failed reading it back.
+    frame = _to_frame(payload, variables, url)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return frame
 
 
 def _resolve_api_key() -> str | None:

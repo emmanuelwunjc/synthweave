@@ -50,6 +50,28 @@ def test_second_call_hits_the_cache_not_the_network(tmp_path):
         assert urlopen.call_count == 1  # no second network call
 
 
+def test_a_response_that_fails_to_parse_is_not_cached(tmp_path):
+    """A 200 OK that is not a PUMS payload must not poison the cache.
+
+    The response used to be written to disk before `_to_frame` validated it,
+    so a valid-JSON error object from the Census API was cached permanently.
+    Every later call read it back and failed the same way, until someone
+    deleted `.synthweave_cache/` by hand. Self-perpetuating.
+    """
+    header_only = [["AGEP", "PINCP", "ST"]]
+    with patch(
+        "urllib.request.urlopen", return_value=_mock_response(json.dumps(header_only).encode())
+    ):
+        with pytest.raises(RuntimeError, match="no rows"):
+            fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=tmp_path)
+
+    assert list(tmp_path.glob("*.json")) == []
+
+    with patch("urllib.request.urlopen", return_value=_mock_response(json.dumps(PAYLOAD).encode())):
+        frame = fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=tmp_path)
+    assert len(frame) == 3
+
+
 def test_api_key_reaches_the_request_url():
     captured = {}
 
