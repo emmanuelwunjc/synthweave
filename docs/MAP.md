@@ -29,10 +29,12 @@ meant to ship.
 | deep technical research behind a design decision (constraints, calibration, utility metrics, combining rules, panel dynamics) | `docs/research/METHODOLOGY.md` |
 | why synthweave is positioned the way it is vs. SDV/synthcity/synthpop/etc. | `docs/research/FIELD_SURVEY.md` |
 | how the roadmap breaks into session-sized chunks | `docs/research/WORK_PACKAGES.md` |
-| how a feature was originally scoped and why | `docs/brainstorms/` |
+| how a feature was originally scoped and why | `docs/brainstorms/` (currently `2026-07-29-synthweave-scope-requirements.md`) |
 | the original v0.1 product spec | `docs/specs/synthweave-v0.1.md` |
 | the spec that seeded the 2026-08 bug hunt (I1-I15 in `ISSUES.md`) | `docs/specs/synthweave-v0.1-bug-hunt.md` |
 | reporting a security issue | `SECURITY.md` |
+| the checklist a PR is expected to satisfy | `.github/pull_request_template.md` |
+| what an `area/*` GitHub label (e.g. `area/connectors`) actually covers, or which lane owns a given file | `docs/AUTOPILOT.md` -> "Your lane" (the ownership table; `area/*` labels are for browsing, not lane assignment) |
 
 ## Reading order by role
 
@@ -100,3 +102,17 @@ correct. The gap is that the *relationship* between them is only partly
 written down. This map exists to close that gap for lookup purposes; actually
 merging/deprecating the overlapping content is issue #57's job, not this
 file's.
+
+## Keeping this map from going stale
+
+Two mechanisms, matching the two kinds of file above:
+
+- **Tracked docs**: `tests/test_docs_map_sync.py` runs in CI on every push
+  and PR. It fails if a git-tracked `.md` file isn't mentioned somewhere in
+  this file -- add a new tracked doc, forget to link it here, CI catches it.
+- **Untracked docs**: CI can't see gitignored files at all, so nothing here
+  can be enforced by a required check. `python3 tools/check_docs_map.py`
+  does the same comparison against the real filesystem instead of git, but
+  by the same token it only ever runs locally -- run it yourself after
+  adding a file under `docs/`, the same discipline as
+  `tools/mutation_check.py` after a fix.
