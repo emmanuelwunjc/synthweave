@@ -139,3 +139,65 @@ def _pool(which: str):
     from synthweave.connectors.faker_names import _name_pool
 
     return _name_pool(which)
+
+
+def test_unweighted_provider_attribute_is_rejected_by_name(monkeypatch):
+    """A Faker version that turns a weighted dict into a plain list must fail loudly.
+
+    `Provider.first_names` and friends are Faker internals, not public API, so
+    their shape can change with no deprecation. Silently falling back to
+    unweighted picks would keep the pipeline green while quietly dropping the
+    US name frequency weighting the whole module exists to provide.
+    """
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", ["Aaron", "Adam"], raising=True)
+    with pytest.raises(RuntimeError, match="first_names"):
+        Name("first_name")
+
+
+def test_missing_provider_attribute_names_the_attribute_and_the_version(monkeypatch):
+    """A removed internal must not surface as a bare AttributeError.
+
+    Substitutes the whole provider class, because the attribute is also defined
+    on Faker's base person provider: deleting it from `en_US` alone would fall
+    back to the base one rather than being absent.
+    """
+
+    class ProviderWithoutLastNames:
+        first_names = {"Aaron": 1.0}
+        first_names_female = {"April": 1.0}
+        first_names_male = {"Aaron": 1.0}
+
+    monkeypatch.setattr("faker.providers.person.en_US.Provider", ProviderWithoutLastNames)
+    with pytest.raises(RuntimeError) as excinfo:
+        Name("last_name")
+    message = str(excinfo.value)
+    assert "last_names" in message
+    assert "Faker>=20,<41" in message
+
+
+def test_empty_provider_mapping_is_rejected(monkeypatch):
+    """An empty pool would make every drawn name identical or crash inside `pick`."""
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "last_names", {}, raising=True)
+    with pytest.raises(RuntimeError, match="last_names"):
+        Name("last_name")
+
+
+@pytest.mark.parametrize("weight", [0.0, -1.0, "0.01", None])
+def test_non_positive_or_non_numeric_weight_is_rejected(monkeypatch, weight):
+    """Weights must be positive numbers: `pick` divides by their sum."""
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", {"Aaron": 1.0, "Adam": weight}, raising=True)
+    with pytest.raises(RuntimeError, match="first_names"):
+        Name("first_name")
+
+
+def test_valid_provider_data_still_builds_a_weighted_pool():
+    """The guard must not reject the real Faker data it is meant to protect."""
+    values, weights = _pool("first_name")
+    assert len(values) == len(weights) > 0
+    assert (weights > 0).all()

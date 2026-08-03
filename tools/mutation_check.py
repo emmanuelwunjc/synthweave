@@ -430,6 +430,12 @@ MUTATIONS = [
         "    registry._restore(snapshot)",
         "    pass",
     ),
+    (
+        "#63 faker_names validates Faker's private provider shape",
+        "src/synthweave/connectors/faker_names.py",
+        "    pool: Any = _checked_provider_pool(Provider, attr)",
+        "    pool: Any = getattr(Provider, attr)",
+    ),
 ]
 
 
