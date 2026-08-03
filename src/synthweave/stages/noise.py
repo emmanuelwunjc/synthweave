@@ -150,6 +150,29 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
     return rates
 
 
+def _restore_dtype(values: np.ndarray, dtype: Any) -> np.ndarray | pd.api.extensions.ExtensionArray:
+    """Give a noised column back its original dtype where the values allow it.
+
+    Corruption runs through an object array regardless of the column's real
+    type, so writing it straight back promoted every noised column to
+    `object`, even at rate 0.0 where nothing actually changed. Only `Missing`
+    is safe to undo: it introduces `None`, which a float column already
+    represents as NaN and a non-nullable int column cannot hold at all, so an
+    int column widens to pandas' nullable `Int64` rather than losing its
+    numeric type. `Typo`/`OCR` replace a value with different text, which is
+    a real type change, not noise to paper over; the cast below fails for
+    that case and the column is left as object, as it must be.
+    """
+    if dtype == object:
+        return values
+    try:
+        if any(v is None for v in values) and pd.api.types.is_integer_dtype(dtype):
+            return pd.array(values, dtype="Int64")
+        return values.astype(dtype)
+    except (TypeError, ValueError):
+        return values
+
+
 @dataclass
 class _Applied:
     eligible: int = 0
@@ -184,6 +207,7 @@ class Noise:
                         f"noise config names column {column!r} of table {table.name!r}, "
                         f"which does not exist; available: {sorted(chunk.columns)}"
                     )
+                original_dtype = chunk[column].dtype
                 values = chunk[column].to_numpy(dtype=object)
                 for op in ops:
                     salt = f"noise\x00{table.name}\x00{column}\x00{op.name}"
@@ -198,7 +222,7 @@ class Noise:
                     counter.corrupted += int(hit.sum())
                     if hit.any():
                         values[hit] = op.corrupt(values[hit], keys[hit], ctx.seed, salt)
-                chunk[column] = values
+                chunk[column] = _restore_dtype(values, original_dtype)
             yield chunk
 
         ctx.report(
