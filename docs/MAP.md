@@ -108,8 +108,11 @@ file's.
 Two mechanisms, matching the two kinds of file above:
 
 - **Tracked docs**: `tests/test_docs_map_sync.py` runs in CI on every push
-  and PR. It fails if a git-tracked `.md` file isn't mentioned somewhere in
-  this file -- add a new tracked doc, forget to link it here, CI catches it.
+  and PR. It fails if a git-tracked `.md` file isn't indexed here as a table
+  row, a list entry, a link, or a line in the tree above. A name that only
+  appears in a passing sentence does not count, since that leaves the reader
+  nothing to follow. Add a new tracked doc, forget to list it here, CI
+  catches it.
 - **Untracked docs**: CI can't see gitignored files at all, so nothing here
   can be enforced by a required check. `python3 tools/check_docs_map.py`
   does the same comparison against the real filesystem instead of git, but

@@ -12,11 +12,46 @@ docs/, the way you'd run tools/mutation_check.py after a fix.
 """
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 EXEMPT = {"MAP.md"}
+
+# Markdown structures that make a filename an entry a reader can follow: a
+# table row, a list item, or a fenced block (the map's one-line tree).
+_ENTRY_PREFIXES = ("|", "-", "*", "+")
+_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
+
+def _entry_text(map_text: str):
+    """Yield only the parts of the map that index something.
+
+    A bare substring search over the whole file counts any prose sentence
+    that happens to name a file, which reads as covered while leaving the
+    reader nothing to follow. Prose is what this filters out.
+    """
+    yield from (match.group(0) for match in _LINK.finditer(map_text))
+    in_fence = False
+    for raw in map_text.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith(_ENTRY_PREFIXES):
+            yield line
+
+
+def is_indexed(map_text: str, doc_path: str) -> bool:
+    """Whether docs/MAP.md actually indexes `doc_path`, not merely names it.
+
+    Shared with tests/test_docs_map_sync.py on purpose: the test and this
+    script check the same repo from different angles (git vs the filesystem),
+    and two copies of the rule would drift.
+    """
+    name = pathlib.PurePosixPath(doc_path).name
+    return any(name in entry for entry in _entry_text(map_text))
 
 
 def main() -> int:
@@ -24,12 +59,12 @@ def main() -> int:
     missing = [
         str(path.relative_to(ROOT))
         for path in sorted(DOCS.rglob("*.md"))
-        if path.name not in EXEMPT and path.name not in map_text
+        if path.name not in EXEMPT and not is_indexed(map_text, path.name)
     ]
     if not missing:
-        print("Every .md file under docs/ is mentioned in docs/MAP.md.")
+        print("Every .md file under docs/ is indexed in docs/MAP.md.")
         return 0
-    print("Not mentioned in docs/MAP.md:")
+    print("Not indexed in docs/MAP.md:")
     for path in missing:
         print(f"  {path}")
     return 1
