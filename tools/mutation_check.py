@@ -340,6 +340,12 @@ MUTATIONS = [
         "            if name in needed:\n                needed.update(entity.attributes[name].depends_on())",
         "            pass",
     ),
+    (
+        "#40 CART trees seeded so tied splits break the same way every fit",
+        "src/synthweave/stages/synthesize.py",
+        "            random_state = int(_hash.hash_key(self.seed, f\"cart\\x00{target}\"), 16) % (2**32)",
+        "            random_state = None",
+    ),
 ]
 
 
