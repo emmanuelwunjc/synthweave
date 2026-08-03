@@ -7,9 +7,13 @@ table()/schema(), assert on the result or on a pipeline run.
 
 from __future__ import annotations
 
+import re
+
+import numpy as np
 import pandas as pd
 import pytest
 
+import invariants
 import synthweave as sw
 
 
@@ -120,3 +124,103 @@ def test_schema_run_to_writes_csv_like_a_hand_built_pipeline(tmp_path):
     assert set(result.paths) == {"records"}
     written = pd.read_csv(result.paths["records"])
     assert len(written) == 50
+
+
+# --- sw.Mode.real_data(): loading the source -----------------------------
+
+
+@pytest.fixture
+def donor_frame() -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    return pd.DataFrame(
+        {
+            "education": rng.choice(["HS", "College"], size=2_000, p=[0.6, 0.4]),
+            "wage": rng.uniform(20_000, 90_000, size=2_000),
+            "age": rng.integers(18, 70, size=2_000),
+        }
+    )
+
+
+def test_real_data_returns_a_mode_instance_from_a_dataframe(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    assert isinstance(m, sw.Mode)
+
+
+def test_real_data_loads_a_csv_file(donor_frame, tmp_path):
+    path = tmp_path / "donor.csv"
+    donor_frame.to_csv(path, index=False)
+    m = sw.Mode.real_data(source=str(path))
+    assert isinstance(m, sw.Mode)
+
+
+def test_real_data_loads_a_parquet_file(donor_frame, tmp_path):
+    path = tmp_path / "donor.parquet"
+    donor_frame.to_parquet(path)
+    m = sw.Mode.real_data(source=str(path))
+    assert isinstance(m, sw.Mode)
+
+
+def test_real_data_rejects_an_unsupported_extension(tmp_path):
+    path = tmp_path / "donor.txt"
+    path.write_text("not real data")
+    with pytest.raises(ValueError, match=re.escape(str(path))):
+        sw.Mode.real_data(source=str(path))
+
+
+def test_real_datas_docstring_disclaims_differential_privacy():
+    assert "differential privacy" in sw.Mode.real_data.__doc__.lower()
+
+
+# --- sw.Mode.real_data(): attribute()'s epsilon dispatch -------------------
+
+
+def test_attribute_without_epsilon_uses_the_mode_level_default(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=0.75)
+    m.attribute("wage")
+    assert m._real_data_epsilon["wage"] == 0.75
+
+
+def test_attribute_epsilon_overrides_the_mode_level_default(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=0.75)
+    m.attribute("wage", epsilon=0.5)
+    assert m._real_data_epsilon["wage"] == 0.5
+
+
+# --- sw.Mode.real_data(): one CARTSynthesizer per distinct epsilon ---------
+
+
+def test_two_attributes_at_the_same_epsilon_share_one_synthesizer(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    m.attribute("wage")
+    m.attribute("age")
+    synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+    assert isinstance(synthesizer, sw.CARTSynthesizer)
+    assert set(synthesizer.columns) == {"wage", "age"}
+
+
+def test_two_attributes_at_different_epsilons_get_two_synthesizers(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    m.attribute("wage", epsilon=0.5)
+    m.attribute("age", epsilon=2.0)
+    synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+    assert not isinstance(synthesizer, sw.CARTSynthesizer)
+    assert len(synthesizer.synthesizers) == 2
+    assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
+
+
+# --- sw.Mode.real_data(): a full run actually synthesizes from the donor ---
+
+
+def test_schema_run_synthesizes_real_data_columns_from_the_donor_pool(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    education = m.attribute("education")
+    wage = m.attribute("wage")
+    person = m.entity(
+        "person", count=500, attributes={"education": education, "wage": wage}
+    )
+    table = m.table("roster", grain="person", carry=["education", "wage"])
+
+    result = m.schema(entities=[person], tables=[table], seed=11).run()
+
+    invariants.assert_values_come_from(result["roster"], "education", donor_frame["education"])
+    invariants.assert_values_come_from(result["roster"], "wage", donor_frame["wage"])
