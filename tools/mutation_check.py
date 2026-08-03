@@ -346,6 +346,12 @@ MUTATIONS = [
         "            random_state = int(_hash.hash_key(self.seed, f\"cart\\x00{target}\"), 16) % (2**32)",
         "            random_state = None",
     ),
+    (
+        "#42 a noised column keeps its dtype where the values still allow it",
+        "src/synthweave/stages/noise.py",
+        "                chunk[column] = _restore_dtype(values, original_dtype)",
+        "                chunk[column] = values",
+    ),
 ]
 
 
