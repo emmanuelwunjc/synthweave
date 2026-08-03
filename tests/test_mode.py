@@ -267,10 +267,80 @@ def test_attribute_with_variable_registers_it():
     assert m._variables["wage"] == "PINCP"
 
 
+def test_two_attributes_can_share_one_acs_variable():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=50, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        result = m.schema(entities=[person], tables=[table], seed=5).run()
+
+    donor_wages = {20_000 + i * 137 for i in range(200)}
+    assert set(result["roster"]["wage"]) <= donor_wages
+    assert set(result["roster"]["earnings"]) <= donor_wages
+
+
+def test_a_shared_acs_variable_is_requested_once():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=10, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        m.schema(entities=[person], tables=[table], seed=5).run()
+
+    requested = urlopen.call_args.args[0]
+    assert requested.count("PINCP") == 1
+
+
+def test_scope_generalizes_the_fetched_rows_by_epsilon():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP")
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    # epsilon 0.5 asks for a shallow tree, not CART's unbounded default.
+    assert synthesizer.max_depth == 2
+
+
+def test_scope_attribute_epsilon_overrides_the_mode_level_default():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP", epsilon=1.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert synthesizer.max_depth == 4
+
+
+def test_scope_attributes_at_different_epsilons_get_two_synthesizers():
+    m = sw.Mode.scope(area_code="NY")
+    m.attribute("wage", variable="PINCP", epsilon=0.5)
+    m.attribute("age", variable="AGEP", epsilon=2.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert not isinstance(synthesizer, sw.CARTSynthesizer)
+    assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
+    assert {s.max_depth for s in synthesizer.synthesizers} == {2, 8}
+
+
 def test_scopes_docstring_first_sentence_states_state_level_only():
-    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0].lower()
-    assert "state" in first_sentence
-    assert "only" in first_sentence
+    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0]
+    assert "state-level ACS geography only" in first_sentence
+
+
+def test_scopes_docstring_disclaims_differential_privacy():
+    assert "differential privacy" in sw.Mode.scope.__doc__.lower()
 
 
 def test_schema_run_calls_fetch_pums_once_for_every_attribute_combined():
@@ -298,6 +368,30 @@ def test_a_second_run_on_the_same_schema_does_not_refetch():
         first_count = urlopen.call_count
         schema.run()
         assert urlopen.call_count == first_count
+
+
+def test_schema_defers_the_fetch_until_run():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        schema = m.schema(entities=[person], tables=[table], seed=5)
+        assert urlopen.call_count == 0
+        schema.run()
+        assert urlopen.call_count == 1
+
+
+def test_an_unrecognized_area_code_raises_on_run_not_on_schema():
+    m = sw.Mode.scope(area_code="Nowhere")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    schema = m.schema(entities=[person], tables=[table], seed=5)
+    with pytest.raises(ValueError, match="Nowhere"):
+        schema.run()
 
 
 def test_schema_run_synthesizes_from_real_acs_rows():

@@ -11,6 +11,7 @@ and the table-noise bookkeeping `table()` collects, so `schema()` can wire a
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -53,15 +54,27 @@ class Mode:
         return RealDataMode(_load_source(source), epsilon=epsilon)
 
     @staticmethod
-    def scope(area_code: str) -> "ScopeMode":
+    def scope(area_code: str, *, epsilon: float = 1.0) -> "ScopeMode":
         """Maps onto state-level ACS geography only, nothing finer than that.
 
         `fetch_pums` resolves geography to a US state and no further (no
         county, no PUMA); `area_code` is passed straight through to it as
         `state=`, so any form `_resolve_state` accepts works here too (a
         FIPS code, a USPS abbreviation, or a full state name).
+
+        `epsilon` is NOT differential privacy: no Laplace/Gaussian mechanism
+        and no privacy accounting exist in this codebase. It is a convenience
+        knob mapped onto `CARTSynthesizer`'s existing, already-correct
+        generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
+        which is real and effective but not a formal privacy guarantee. See
+        `_cart_knobs` for the mapping. It applies here for the same reason it
+        applies in `real_data` mode, and more so: the donor rows are real
+        Census respondent records, so leaving the synthesizer at its
+        unbounded defaults would disclose more than the mode a user feeds
+        their own data to. `attribute(name, variable=..., epsilon=...)`
+        overrides it per attribute.
         """
-        return ScopeMode(area_code)
+        return ScopeMode(area_code, epsilon=epsilon)
 
     def attribute(self, name: str, **kwargs: Any) -> Rule:
         noise_kwargs = {k: kwargs.pop(k) for k in _NOISE_RATE_KWARGS if k in kwargs}
@@ -125,7 +138,11 @@ class Mode:
 
     def schema(self, *, entities: list[Entity], tables: list[Table], seed: int | str) -> "ModeSchema":
         schema = Schema(entities=entities, tables=tables, seed=seed)
-        return ModeSchema(schema, self._table_noise, self._extra_pipeline_kwargs())
+        # The builder goes across uncalled. `ScopeMode` fetches real rows off
+        # the network inside it, and a fetch (or a ValueError for an area code
+        # the connector does not recognize) belongs on `.run()`, not on a call
+        # that otherwise only assembles objects.
+        return ModeSchema(schema, self._table_noise, self._extra_pipeline_kwargs)
 
     def _extra_pipeline_kwargs(self) -> dict[str, Any]:
         return {}
@@ -170,14 +187,7 @@ class RealDataMode(Mode):
     def _extra_pipeline_kwargs(self) -> dict[str, Any]:
         if not self._real_data_epsilon:
             return {}
-        groups: dict[float, list[str]] = {}
-        for name, eps in self._real_data_epsilon.items():
-            groups.setdefault(eps, []).append(name)
-        synthesizers = [
-            _empirical_cart(columns, self._frame, **_cart_knobs(eps))
-            for eps, columns in groups.items()
-        ]
-        return {"synthesizer": _chain(synthesizers)}
+        return {"synthesizer": _epsilon_chain(self._real_data_epsilon, self._frame)}
 
 
 class ScopeMode(Mode):
@@ -185,16 +195,21 @@ class ScopeMode(Mode):
     fetched automatically and synthesized the same way `real_data` mode is.
     """
 
-    def __init__(self, area_code: str) -> None:
+    def __init__(self, area_code: str, *, epsilon: float) -> None:
         super().__init__()
         self.area_code = area_code
+        self._epsilon = epsilon
         self._variables: dict[str, str] = {}
+        self._scope_epsilon: dict[str, float] = {}
         self._fetched: pd.DataFrame | None = None
 
-    def _build_rule(self, name: str, *, variable: str | None = None) -> Rule:
+    def _build_rule(
+        self, name: str, *, variable: str | None = None, epsilon: float | None = None
+    ) -> Rule:
         if variable is None:
             raise ValueError(f"attribute {name!r}: scope mode needs variable=")
         self._variables[name] = variable
+        self._scope_epsilon[name] = epsilon if epsilon is not None else self._epsilon
         return _RealDataColumn(name)
 
     def _extra_pipeline_kwargs(self) -> dict[str, Any]:
@@ -203,15 +218,22 @@ class ScopeMode(Mode):
         if self._fetched is None:
             from .connectors.acs_pums import fetch_pums
 
-            fetched = fetch_pums(list(self._variables.values()), state=self.area_code)
+            # Two attributes may name the same ACS variable (two views of one
+            # source column, e.g. at different epsilons), so ask the connector
+            # for each distinct code once rather than repeating it in the
+            # request.
+            requested = list(dict.fromkeys(self._variables.values()))
+            fetched = fetch_pums(requested, state=self.area_code)
             # The mode's column names and the ACS variable codes they were
             # requested under can differ (`attribute("wage", variable="PINCP")`),
             # but the synthesizer stage matches by the mode's own column name.
-            self._fetched = fetched.rename(
-                columns={variable: name for name, variable in self._variables.items()}
+            # Built per attribute name rather than renamed in place: a rename
+            # map keyed on the variable would collapse those shared codes and
+            # silently drop every attribute but the last one claiming it.
+            self._fetched = pd.DataFrame(
+                {name: fetched[variable] for name, variable in self._variables.items()}
             )
-        synthesizer = _empirical_cart(list(self._variables), self._fetched)
-        return {"synthesizer": synthesizer}
+        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}
 
 
 class _RealDataColumn(_BaseRule):
@@ -237,10 +259,30 @@ def _empirical_cart(columns: list[str], frame: pd.DataFrame, **knobs: Any) -> CA
 
     Shared by `RealDataMode` and `ScopeMode`: both wire real donor rows into
     the same structure-source-plus-synthesizer shape, differing only in
-    where the frame came from (user-supplied vs. `fetch_pums`) and whether
-    `knobs` carries an epsilon-derived generalization setting.
+    where the frame came from (user-supplied vs. `fetch_pums`).
     """
     return CARTSynthesizer(columns=columns, structure=Empirical(frame), **knobs)
+
+
+def _epsilon_chain(
+    epsilons: dict[str, float], frame: pd.DataFrame
+) -> CARTSynthesizer | "_ChainedSynthesizer":
+    """Columns grouped by their effective epsilon, one synthesizer per group.
+
+    Shared by `RealDataMode` and `ScopeMode`: both let a caller set epsilon
+    per attribute, and one tree cannot carry two generalization levels, so
+    columns asking for the same level are fit together and the groups are
+    chained. Only the donor frame differs between the two modes.
+    """
+    groups: dict[float, list[str]] = {}
+    for name, epsilon in epsilons.items():
+        groups.setdefault(epsilon, []).append(name)
+    return _chain(
+        [
+            _empirical_cart(columns, frame, **_cart_knobs(epsilon))
+            for epsilon, columns in groups.items()
+        ]
+    )
 
 
 def _chain(synthesizers: list[CARTSynthesizer]) -> CARTSynthesizer | "_ChainedSynthesizer":
@@ -305,17 +347,20 @@ class ModeSchema:
         self,
         schema: Schema,
         table_noise: dict[str, dict[str, list[NoiseOp]]],
-        extra_pipeline_kwargs: dict[str, Any],
+        extra_pipeline_kwargs: Callable[[], dict[str, Any]],
     ) -> None:
         self.schema = schema
         self._table_noise = dict(table_noise)
-        self._extra_pipeline_kwargs = extra_pipeline_kwargs
+        self._build_extra_pipeline_kwargs = extra_pipeline_kwargs
 
     def _pipeline(self) -> Pipeline:
         from .stages.noise import Noise
 
         noiser = Noise(self._table_noise) if self._table_noise else None
-        return Pipeline(self.schema, noiser=noiser, **self._extra_pipeline_kwargs)
+        # Called per run, not once at construction, so the mode's own
+        # side effects (`ScopeMode`'s fetch) land on `.run()`. The mode
+        # caches what it fetched, so a second run reuses those rows.
+        return Pipeline(self.schema, noiser=noiser, **self._build_extra_pipeline_kwargs())
 
     def run(self) -> PipelineResult:
         return self._pipeline().run()

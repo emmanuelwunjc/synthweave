@@ -419,6 +419,18 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#89.1 two attributes sharing one ACS variable both keep a column",
+        "src/synthweave/mode.py",
+        "            self._fetched = pd.DataFrame(\n                {name: fetched[variable] for name, variable in self._variables.items()}\n            )",
+        "            self._fetched = fetched.rename(\n                columns={variable: name for name, variable in self._variables.items()}\n            )",
+    ),
+    (
+        "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
+        "src/synthweave/mode.py",
+        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
+        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+    ),
+    (
         "#48 unregister actually removes the entry",
         "src/synthweave/registry.py",
         "    del table[name]",
