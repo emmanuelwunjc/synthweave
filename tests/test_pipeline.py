@@ -5,6 +5,7 @@ Grouped by the property being proved, not by the module doing the work.
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import pandas as pd
@@ -647,6 +648,46 @@ def test_identifiers_all_have_the_requested_width():
     values = sw.Pipeline(_one_entity(prefix="I", digits=18)).run()["t"]["id"]
     widths = {len(v) - 1 for v in values}
     assert widths == {18}, f"asked for 18 digits, got widths {sorted(widths)}"
+
+
+def test_the_recommended_digit_count_is_the_tightest_one_that_works():
+    """The narrowest keyspace whose collision expectation stays under one is
+    population**2 / 2, so the recommendation should be exactly that value's
+    digit count. A prior version added one digit too many: still usable, so
+    only checking that `Identifier` accepts the number would have missed it."""
+    population = 400_000
+    person = sw.Entity(
+        "person", count=population, attributes={"a": sw.Constant("x")},
+        identifiers=[sw.Identifier("id", prefix="I", digits=1)],
+    )
+    schema = sw.Schema(
+        entities=[person],
+        tables=[sw.Table("t", grain=sw.PerEntity("person"), identifiers=["id"])],
+        seed=1,
+    )
+    with pytest.raises(sw.SchemaError, match=r"Use digits=(\d+) or more") as exc:
+        sw.Pipeline(schema)
+    needed = int(re.search(r"Use digits=(\d+) or more", str(exc.value)).group(1))
+    assert needed == len(str(population * population // 2))
+    sw.Identifier("id", prefix="I", digits=needed)  # must not raise
+
+
+def test_a_population_needing_more_than_18_digits_says_so_instead_of_recommending_one():
+    """Past ~1.4 billion entities the birthday-bound-safe width exceeds
+    MAX_DIGITS, so recommending it would send a user straight into a second,
+    unreachable error."""
+    person = sw.Entity(
+        "person", count=2_000_000_000, attributes={"a": sw.Constant("x")},
+        identifiers=[sw.Identifier("id", prefix="I", digits=18)],
+    )
+    schema = sw.Schema(
+        entities=[person],
+        tables=[sw.Table("t", grain=sw.PerEntity("person"), identifiers=["id"])],
+        seed=1,
+    )
+    with pytest.raises(sw.SchemaError, match="past the 18-digit limit") as exc:
+        sw.Pipeline(schema)
+    assert "Use digits=" not in str(exc.value)
 
 
 def test_a_digit_count_past_the_hash_width_is_rejected():

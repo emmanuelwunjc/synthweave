@@ -9,7 +9,7 @@ its entity does not define.
 from __future__ import annotations
 
 from .rules import resolve_order
-from .schema import PerEvent, PerPeriod, Schema
+from .schema import MAX_DIGITS, PerEvent, PerPeriod, Schema
 
 RESERVED_PREFIX = "_sw_"
 # Below one expected collision, every entity is expected to keep its own
@@ -140,8 +140,17 @@ def _check_identifier_width(entity, identifier, where: str) -> None:
     if expected < TOLERABLE_COLLISIONS:
         return
     # Invert the bound: the narrowest keyspace whose expectation stays under
-    # one collision is population**2 / 2, so that many digits plus one.
-    needed = len(str(population * population // 2)) + 1
+    # one collision is 10**digits > population**2 / 2, so `needed` is just the
+    # digit count of that threshold. A value with `d` digits is already less
+    # than 10**d, so no "+1" belongs on top of it.
+    needed = len(str(population * population // 2))
+    if needed > MAX_DIGITS:
+        raise SchemaError(
+            f"{where}: identifier {identifier.tag!r} cannot stay under one expected "
+            f"collision for {population:,} {entity.name!r} entities; that would need "
+            f"{needed} digits, past the {MAX_DIGITS}-digit limit the derivation supports. "
+            f"Split this population across more than one identifier stream."
+        )
     raise SchemaError(
         f"{where}: identifier {identifier.tag!r} uses {identifier.digits} digits, which "
         f"is too narrow for {population:,} {entity.name!r} entities. Around "

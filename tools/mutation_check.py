@@ -364,6 +364,18 @@ MUTATIONS = [
         '    _check_unique(list(table.identifiers), f"{where} identifier")',
         "    pass",
     ),
+    (
+        "#45.2a identifier-width fix drops the erroneous extra digit",
+        "src/synthweave/validation.py",
+        "    needed = len(str(population * population // 2))",
+        "    needed = len(str(population * population // 2)) + 1",
+    ),
+    (
+        "#45.2b a population past the digit limit says so instead of recommending it",
+        "src/synthweave/validation.py",
+        "    if needed > MAX_DIGITS:",
+        "    if False:",
+    ),
 ]
 
 
