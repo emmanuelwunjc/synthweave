@@ -17,6 +17,7 @@ import pytest
 
 import invariants
 import synthweave as sw
+from synthweave.mode import _cart_knobs
 
 
 # --- construction -------------------------------------------------------
@@ -54,6 +55,18 @@ def test_normal_missing_sd_raises_naming_it():
         m.attribute("income", distribution="normal", mean=1)
 
 
+def test_normal_missing_mean_raises_naming_it():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="mean"):
+        m.attribute("income", distribution="normal", sd=1)
+
+
+def test_an_unknown_kwarg_is_rejected_rather_than_dropped():
+    m = sw.Mode.metadata()
+    with pytest.raises(ValueError, match="typo"):
+        m.attribute("income", min=0, max=1, typo=0.1)
+
+
 # --- attribute(): noise-kwarg bookkeeping --------------------------------
 
 
@@ -84,15 +97,45 @@ def test_table_returns_a_real_table():
 
 def test_schema_run_produces_null_values_near_the_configured_missing_rate():
     m = sw.Mode.metadata()
-    m.attribute("income", min=0, max=100, missing_rate=0.3)
-    person = m.entity(
-        "person", count=20_000, attributes={"income": m.attribute("income", min=0, max=100)}
-    )
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
     table = m.table("records", grain="person", carry=["income"])
 
     result = m.schema(entities=[person], tables=[table], seed=42).run()
 
     assert 0.29 < result["records"]["income"].isna().mean() < 0.31
+
+
+def test_missing_rate_reaches_a_column_carried_by_wildcard():
+    m = sw.Mode.metadata()
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+    table = m.table("records", grain="person", carry="*")
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_missing_rate_reaches_a_column_declared_after_the_table():
+    m = sw.Mode.metadata()
+    table = m.table("records", grain="person", carry=["income"])
+    rule = m.attribute("income", min=0, max=100, missing_rate=0.5)
+    person = m.entity("person", count=20_000, attributes={"income": rule})
+
+    result = m.schema(entities=[person], tables=[table], seed=42).run()
+
+    assert 0.49 < result["records"]["income"].isna().mean() < 0.51
+
+
+def test_a_noise_rate_matching_no_column_anywhere_raises():
+    m = sw.Mode.metadata()
+    rule = m.attribute("incme", min=0, max=100, missing_rate=0.3)
+    person = m.entity("person", count=10, attributes={"income": rule})
+    table = m.table("records", grain="person", carry=["income"])
+
+    with pytest.raises(ValueError, match="would never be applied"):
+        m.schema(entities=[person], tables=[table], seed=1)
 
 
 def test_schema_run_matches_hand_built_pipeline_for_the_same_seed():
@@ -173,6 +216,31 @@ def test_real_datas_docstring_disclaims_differential_privacy():
     assert "differential privacy" in sw.Mode.real_data.__doc__.lower()
 
 
+# --- sw.Mode.real_data(): the epsilon -> CART knob mapping ----------------
+#
+# `Mode.real_data`'s docstring points callers at `_cart_knobs` as the source
+# of truth for the mapping, so the numbers it names have to be the numbers it
+# produces. These pin both halves so neither can drift alone.
+
+
+def test_cart_knobs_at_the_epsilon_ceiling_are_pinned():
+    assert _cart_knobs(5.0) == {
+        "max_depth": None,
+        "min_samples_leaf": 20,
+        "fit_cap": 200_000,
+    }
+
+
+def test_epsilon_past_the_ceiling_produces_the_ceiling_knobs():
+    assert _cart_knobs(10.0) == _cart_knobs(5.0)
+
+
+def test_cart_knobs_docstring_names_the_values_it_actually_produces():
+    doc = _cart_knobs.__doc__
+    for fragment in ("max_depth=None", "min_samples_leaf=20", "fit_cap=DEFAULT_FIT_CAP"):
+        assert fragment in doc
+
+
 # --- sw.Mode.real_data(): attribute()'s epsilon dispatch -------------------
 
 
@@ -186,6 +254,28 @@ def test_attribute_epsilon_overrides_the_mode_level_default(donor_frame):
     m = sw.Mode.real_data(source=donor_frame, epsilon=0.75)
     m.attribute("wage", epsilon=0.5)
     assert m._real_data_epsilon["wage"] == 0.5
+
+
+# --- sw.Mode.real_data(): rejecting a caller error at the caller's line ----
+
+
+@pytest.mark.parametrize("bad", [0, -1, -0.5])
+def test_real_data_rejects_a_non_positive_epsilon(donor_frame, bad):
+    with pytest.raises(ValueError, match=re.escape(repr(bad))):
+        sw.Mode.real_data(source=donor_frame, epsilon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_attribute_rejects_a_non_positive_epsilon_naming_the_attribute(donor_frame, bad):
+    m = sw.Mode.real_data(source=donor_frame)
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage", epsilon=bad)
+
+
+def test_attribute_rejects_an_unknown_kwarg_naming_the_attribute(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame)
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage", min=0, max=1)
 
 
 # --- sw.Mode.real_data(): one CARTSynthesizer per distinct epsilon ---------
@@ -259,6 +349,28 @@ def test_attribute_without_variable_raises_naming_it():
     m = sw.Mode.scope(area_code="NY")
     with pytest.raises(ValueError, match="wage"):
         m.attribute("wage")
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_epsilon(bad):
+    """Scope reaches the same clamp real_data does, so it needs the same guard.
+
+    `_cart_knobs` turns 0 or -1 into 0.01 and hands back the most generalized
+    column the mapping can produce. That is a plausible-looking result for
+    what is really a typo, and it is worse here than in real_data mode: the
+    donor rows are real Census respondents, so a silently mangled epsilon is
+    a silently wrong disclosure posture.
+    """
+    with pytest.raises(ValueError, match="positive"):
+        sw.Mode.scope(area_code="NY", epsilon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_per_attribute_epsilon(bad):
+    """The per-column override reaches the same clamp, so it gets the same guard."""
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="positive"):
+        m.attribute("wage", variable="PINCP", epsilon=bad)
 
 
 def test_attribute_with_variable_registers_it():
