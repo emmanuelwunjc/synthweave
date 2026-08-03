@@ -58,7 +58,7 @@ from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
 from .pipeline import Pipeline, PipelineResult
 from .provenance import ProvenanceRecord, Tagged, cited, modeled, user
-from .registry import available, register, resolve
+from .registry import available, register, resolve, unregister
 from .rules import (
     Choice,
     Conditional,
@@ -114,6 +114,6 @@ __all__ = [
     # provenance
     "Tagged", "ProvenanceRecord", "user", "modeled", "cited",
     # extension
-    "register", "resolve", "available", "derive_id",
+    "register", "unregister", "resolve", "available", "derive_id",
     "SchemaError",
 ]

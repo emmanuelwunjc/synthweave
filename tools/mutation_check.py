@@ -418,6 +418,18 @@ MUTATIONS = [
         '    combined = np.concatenate([first, second])\n    _assert_same_values(\n        keys, baseline, combined, "splitting the keys across two calls changed a value "\n        "(the rule is not chunk invariant, e.g. it reads chunk-level state)"\n    )',
         "    pass",
     ),
+    (
+        "#48 unregister actually removes the entry",
+        "src/synthweave/registry.py",
+        "    del table[name]",
+        "    pass",
+    ),
+    (
+        "#48 the autouse registry-reset fixture restores the pre-test snapshot",
+        "tests/conftest.py",
+        "    registry._restore(snapshot)",
+        "    pass",
+    ),
 ]
 
 

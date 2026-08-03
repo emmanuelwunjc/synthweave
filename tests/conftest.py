@@ -10,6 +10,22 @@ from __future__ import annotations
 import pytest
 
 import synthweave as sw
+from synthweave import registry
+
+
+@pytest.fixture(autouse=True)
+def _reset_registries():
+    """Undo any `register()`/`unregister()` a test performs.
+
+    Without this, a test that registers a plugin under a fixed name (a stub
+    structure source, a test noiser) either leaks it into `sw.available()`
+    for every later test in the same process, or raises "already
+    registered" the next time that same test runs in a warm interpreter
+    (`pytest-repeat`, `--lf`, a notebook).
+    """
+    snapshot = registry._snapshot()
+    yield
+    registry._restore(snapshot)
 
 
 @pytest.fixture

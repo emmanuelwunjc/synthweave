@@ -44,6 +44,37 @@ def register(kind: str, name: str, *, overwrite: bool = False) -> Callable[[T], 
     return decorator
 
 
+def unregister(kind: str, name: str) -> None:
+    """Remove a registered implementation.
+
+    Raises if `name` was never registered under `kind`, so a typo in a
+    cleanup call is not silently a no-op.
+    """
+    table = registry(kind)
+    if name not in table:
+        raise KeyError(f"no {kind} named {name!r} to unregister")
+    del table[name]
+
+
+def _snapshot() -> dict[str, dict[str, Any]]:
+    """Every registry's current contents, for a test fixture to restore.
+
+    A shallow copy per registry is enough: `register`/`unregister` only ever
+    replace or remove a whole entry, never mutate one in place.
+    """
+    return {kind: dict(table) for kind, table in _REGISTRIES.items()}
+
+
+def _restore(snapshot: dict[str, dict[str, Any]]) -> None:
+    """Undo any `register`/`unregister` calls since `_snapshot()`.
+
+    Restores the registries to exactly the given snapshot, including any
+    kind that did not exist yet when it was taken.
+    """
+    _REGISTRIES.clear()
+    _REGISTRIES.update({kind: dict(table) for kind, table in snapshot.items()})
+
+
 def resolve(kind: str, name_or_obj: Any) -> Any:
     """Look up a registered implementation, or pass an instance straight through.
 
