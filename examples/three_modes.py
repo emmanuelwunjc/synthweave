@@ -91,9 +91,14 @@ print("=== Mode 3: scope (borrow a real population, locked to a US state) ===")
 
 # area_code locks to a US STATE and nothing finer. fetch_pums resolves no
 # county and no PUMA, so "NY" here means the whole state.
-scope = sw.Mode.scope(area_code="NY")
+#
+# epsilon is the same knob as in mode 2, and it is still NOT differential
+# privacy. It matters more here: the donor rows are real Census respondent
+# records, not rows the caller already holds, so leaving the synthesizer at
+# its unbounded defaults would disclose more, not less.
+scope = sw.Mode.scope(area_code="NY", epsilon=1.0)
 scope_age = scope.attribute("age", variable="AGEP")
-scope_income = scope.attribute("income", variable="PINCP")
+scope_income = scope.attribute("income", variable="PINCP", epsilon=0.5)
 
 scope_people = scope.entity("person", count=2_000,
                             attributes={"age": scope_age, "income": scope_income},
