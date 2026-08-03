@@ -630,6 +630,13 @@ class _FittedCART:
         raises `TypeError` there rather than converting. Those go through
         `pd.array`, which is the only constructor that takes an
         `ExtensionDtype` and hands back the matching extension array.
+
+        One asymmetry that buys: where `astype` would reject a value the
+        dtype cannot hold, `pd.array` maps it to null. That only reaches
+        values from the empty-donor fallback in `apply`, which come from the
+        chunk rather than a donor pool, so a category the fit never saw lands
+        as null instead of raising. `empty_donor_counts` already records that
+        the fallback fired.
         """
         dtype = self.dtypes.get(column)
         if dtype is None or dtype == object:
