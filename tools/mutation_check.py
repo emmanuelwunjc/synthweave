@@ -430,6 +430,15 @@ MUTATIONS = [
         "    registry._restore(snapshot)",
         "    pass",
     ),
+    (
+        "#60 PackageNotFoundError stays out of the public namespace",
+        "src/synthweave/__init__.py",
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import PackageNotFoundError\n"
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+    ),
 ]
 
 
