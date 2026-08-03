@@ -84,13 +84,53 @@ protection blocks merging until they pass, and a PR must be up to date with
 
 ## Working in parallel
 
-Several sessions may work this repo at once. The rules above still hold; two
+Several sessions may work this repo at once. The rules above still hold; a few
 more apply.
 
-**Own files, not features.** Before starting, agree which files each session
-owns, and never edit a file you do not own. Reaching across is the failure
-mode that corrupts a repo, and it is not caught by tests — both sides pass
-locally and conflict at merge.
+**One worktree per concurrent session. Never share a checkout.**
+
+```bash
+git worktree add ../wt-<name> -b type/short-description
+```
+
+Separate directory, same `.git`, no collisions. Work there for the whole
+change, and remove it once the PR merges:
+
+```bash
+git worktree remove ../wt-<name>
+```
+
+**Owning files is not enough on its own.** File ownership stops two sessions
+editing the same file. It does nothing about `git checkout`, `git pull` or a
+branch switch, which move the entire working tree regardless of who owns
+what. Two different problems, two different mechanisms. You need both.
+
+This is not hypothetical. On 2026-08-02 two agents and the maintainer all
+worked in one checkout. Their changes interleaved on a single branch, and a
+mutation left behind by an interrupted `mutation_check.py` run was committed
+as if it were real code. Nothing was lost, but only because the timing
+happened to be survivable.
+
+**Never run `tools/mutation_check.py` in a checkout someone else may use.**
+It mutates tracked files in place and restores them afterwards. While it
+runs, the tree is transiently wrong: a concurrent `git checkout` can abort,
+and a concurrent `git add -A` will commit a reverted snippet as if it were
+real work. Run it only inside your own worktree.
+
+**Pre-flight check** before touching a checkout that is not yours:
+
+```bash
+git status --short                   # someone else's uncommitted work?
+git branch --show-current            # a branch you did not create?
+ps aux | grep [m]utation_check.py    # a harness mid-run
+```
+
+If any of those show activity you did not cause, leave that checkout alone
+and make a worktree.
+
+**Own files, not features.** Inside that setup, still agree which files each
+session owns, and never edit a file you do not own. Reaching across is not
+caught by tests: both sides pass locally and conflict at merge.
 
 **`tools/mutation_check.py` is the one file everybody touches.** Every fix
 appends to `MUTATIONS`. **Append at the end of the list, never in the
