@@ -15,3 +15,12 @@ repos:
         language: system
         files: ^(src|tests|examples|tools)/
         types: [python]
+      # This repo is public, and files .gitignore calls local-only reached
+      # public history anyway. .gitignore cannot stop a repeat on its own:
+      # `git add -f` bypasses it, and an already-tracked file stays tracked.
+      # No `files:` filter on purpose. The point is to see every staged path,
+      # including the ones .gitignore would otherwise have hidden.
+      - id: leak-guard
+        name: leak-guard (private docs and PII)
+        entry: python3 tools/check_no_private_leak.py
+        language: system

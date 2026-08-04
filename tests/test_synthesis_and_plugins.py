@@ -479,8 +479,87 @@ def test_multi_column_synthesis_is_chunk_invariant(careers):
     invariants.assert_chunk_invariant(careers, synthesizer=_multi())
 
 
-def test_multi_column_synthesis_is_deterministic(careers):
+@pytest.fixture
+def tie_prone_multi() -> tuple[sw.Schema, pd.DataFrame]:
+    """Two synthesized columns, and a root split that ties exactly on the first.
+
+    `careers` is well separated by design -- 400 entities, conditionals with
+    real gaps -- so no fit it drives ever reaches a tie, and a tree fitted
+    without a `random_state` lands on the same split every time anyway. That
+    is why `assert_deterministic(careers, ...)` alone cannot fail here.
+
+    This fixture forces the tie instead of hoping for one. Both binary
+    predictors appear in all four combinations equally often and
+    `first = flag_a + flag_b`, so splitting the root on `flag_a` and
+    splitting it on `flag_b` reduce variance by the identical amount, by
+    construction. `max_depth=1` stops the tree from recovering: the tie
+    decides the whole leaf partition, and so which rows can donate to which.
+
+    `second` is then fitted on the predictors plus `first`, which is what
+    keeps this a test of the *sequential* multi-column path rather than a
+    second copy of the single-column one: a differing tie-break on `first`
+    has to carry into the column visited after it.
+    """
+    combos = list(itertools.product([0, 1], [0, 1]))
+    train = pd.DataFrame(
+        {
+            "flag_a": [a for a, _ in combos] * 8,
+            "flag_b": [b for _, b in combos] * 8,
+        }
+    )
+    train["first"] = train["flag_a"] + train["flag_b"]
+    train["second"] = train["first"] * 10 + train["flag_a"]
+
+    entity = sw.Entity(
+        "person",
+        count=30,
+        attributes={
+            "flag_a": sw.Choice([0, 1], [0.5, 0.5]),
+            "flag_b": sw.Choice([0, 1], [0.5, 0.5]),
+        },
+    )
+    table = sw.Table(
+        "scores",
+        grain=sw.PerEntity("person"),
+        carry=["flag_a", "flag_b"],
+        # Placeholders: CARTSynthesizer overwrites both columns entirely.
+        # Only the Empirical `train` frame feeds the fits.
+        columns={"first": sw.Integer(0, 5), "second": sw.Integer(0, 50)},
+    )
+    schema = sw.Schema(entities=[entity], tables=[table], seed=7)
+    return schema, train
+
+
+def test_multi_column_synthesis_is_deterministic(careers, tie_prone_multi):
+    """Invariant 1 on the multi-column path, on a fixture that can fail it.
+
+    The `careers` arm is the broad smoke check: four columns, a real schema,
+    same seed twice. It is kept because it covers ground the tiny fixture
+    does not, but on its own it proves less than it looks like it does --
+    with a missing `random_state` on the trees it still passes, because
+    nothing it fits ever ties.
+
+    The second arm is the one with teeth. Thirty runs in a single process on
+    a deliberately tied root split: every output must be byte-identical.
+    """
     invariants.assert_deterministic(careers, synthesizer=_multi())
+
+    schema, train = tie_prone_multi
+    synthesizer = sw.CARTSynthesizer(
+        ["first", "second"],
+        tables=["scores"],
+        predictors=["flag_a", "flag_b"],
+        min_samples_leaf=5,
+        max_depth=1,
+        structure=sw.Empirical(train),
+        numeric=["first", "second"],
+    )
+    reference = sw.Pipeline(schema, synthesizer=synthesizer).run()["scores"]
+    for run in range(29):
+        other = sw.Pipeline(schema, synthesizer=synthesizer).run()["scores"]
+        pd.testing.assert_frame_equal(
+            other, reference, obj=f"table 'scores' on rerun {run + 2} of 30"
+        )
 
 
 def test_every_synthesized_value_comes_from_a_donor_row(careers):
