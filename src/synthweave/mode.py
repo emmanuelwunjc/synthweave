@@ -10,6 +10,7 @@ by hand.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -18,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from .pipeline import Pipeline, PipelineResult
+from .provenance import user
 from .rules import Choice, Normal, Rule, Uniform, _BaseRule
 from .schema import Entity, Schema, Table
 from .stages.noise import Missing, Noise, NoiseOp, OCR, Typo
@@ -47,8 +49,26 @@ class Mode:
         and no privacy accounting exist in this codebase. It is a convenience
         knob mapped onto `CARTSynthesizer`'s existing, already-correct
         generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
-        which is real and effective but not a formal privacy guarantee. See
-        `_cart_knobs` for the mapping.
+        which is real and effective for any column the synthesizer conditions
+        on, and is not a formal privacy guarantee. See `_cart_knobs` for the
+        mapping.
+
+        It is not effective for a column with nothing to condition on, which
+        is every column of a single-attribute schema: there the output is a
+        resample of verbatim donor records, and the only knob that bites is
+        `fit_cap`, which decides how many distinct real people get republished
+        rather than how much they are generalized. Lowering epsilon narrows
+        that set and repeats each of them more often. What epsilon should mean
+        instead is open in #163; the paragraph above describes what it does
+        today and settles nothing.
+
+        Giving two attributes different epsilons does not decorrelate them.
+        Each epsilon group is fit as its own tree, but every group after the
+        first conditions on the columns the earlier groups produced, so the
+        donor's joint structure between differently-generalized attributes
+        survives. It survived nothing before #139: the groups were drawn
+        independently, so mixed epsilons kept every marginal and destroyed
+        every relationship, without a warning.
         """
         _check_epsilon(epsilon, "real_data")
         return RealDataMode(_load_source(source), epsilon=epsilon)
@@ -66,13 +86,27 @@ class Mode:
         and no privacy accounting exist in this codebase. It is a convenience
         knob mapped onto `CARTSynthesizer`'s existing, already-correct
         generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
-        which is real and effective but not a formal privacy guarantee. See
-        `_cart_knobs` for the mapping. It applies here for the same reason it
-        applies in `real_data` mode, and more so: the donor rows are real
+        which is real and effective for any column the synthesizer conditions
+        on, and is not a formal privacy guarantee. See `_cart_knobs` for the
+        mapping.
+
+        It is not effective for a column with nothing to condition on, which
+        is every column of a single-attribute schema: there the output is a
+        resample of verbatim donor records, and the only knob that bites is
+        `fit_cap`, which decides how many distinct real people get republished
+        rather than how much they are generalized. Lowering epsilon narrows
+        that set and repeats each of them more often. What epsilon should mean
+        instead is open in #163; the paragraph above describes what it does
+        today and settles nothing.
+
+        Epsilon applies here for the same reason it applies in `real_data`
+        mode, and more so: the donor rows are real
         Census respondent records, so leaving the synthesizer at its
         unbounded defaults would disclose more than the mode a user feeds
         their own data to. `attribute(name, variable=..., epsilon=...)`
-        overrides it per attribute.
+        overrides it per attribute, and mixing epsilons keeps the joint
+        structure between the attributes for the same reason `real_data`
+        does: later epsilon groups condition on the earlier ones.
         """
         _check_epsilon(epsilon, "scope")
         return ScopeMode(area_code, epsilon=epsilon)
@@ -122,13 +156,26 @@ class Mode:
 
     def schema(self, *, entities: list[Entity], tables: list[Table], seed: int | str) -> "ModeSchema":
         schema = Schema(entities=entities, tables=tables, seed=seed)
-        # The noise map resolves now: an unmatched rate is a declaration
-        # mistake, so it should surface on the call that declared it. The
-        # pipeline builder goes across uncalled. `ScopeMode` fetches real rows
-        # off the network inside it, and a fetch (or a ValueError for an area
-        # code the connector does not recognize) belongs on `.run()`, not on a
-        # call that otherwise only assembles objects.
-        return ModeSchema(schema, self._noise_for(schema), self._extra_pipeline_kwargs)
+        # The noise map and the real-column placement resolve now: an unmatched
+        # name is a declaration mistake either way, so it should surface on the
+        # call that declared it. The pipeline builder goes across uncalled.
+        # `ScopeMode` fetches real rows off the network inside it, and a fetch
+        # (or a ValueError for an area code the connector does not recognize)
+        # belongs on `.run()`, not on a call that otherwise only assembles
+        # objects.
+        placement = _placement(self._declared_columns(), schema)
+        return ModeSchema(
+            schema,
+            self._noise_for(schema),
+            partial(self._extra_pipeline_kwargs, placement),
+        )
+
+    def _declared_columns(self) -> Sequence[str]:
+        """Columns this mode synthesizes from real donor rows, in declaration order.
+
+        Empty for `MetadataMode`, which has no donor and no synthesizer.
+        """
+        return ()
 
     def _noise_for(self, schema: Schema) -> dict[str, dict[str, list[NoiseOp]]]:
         """Match every recorded noise rate against the schema's real columns.
@@ -161,8 +208,75 @@ class Mode:
             )
         return noise
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         return {}
+
+
+def _placement(names: Sequence[str], schema: Schema) -> dict[str, list[str]]:
+    """Which of `names` each table actually declares, keyed by table name.
+
+    Two silent failures live here, and both are the same shape as the noise
+    one `_noise_for` already catches: a name the user wrote that nothing in the
+    schema answers to.
+
+    - A real column used to be synthesized into *every* table, because the
+      synthesizer was built unscoped and `_FittedCART.apply` creates a declared
+      column on a chunk that lacks it rather than skipping. A table carrying
+      nothing from the donor came back holding every mode attribute (#144).
+    - An attribute nobody carried was synthesized anyway, into all of them.
+
+    Returned in declaration order per table, which is the order `_epsilon_chain`
+    then conditions in.
+    """
+    names = list(names)
+    if not names:
+        return {}
+    _check_bound_names(schema)
+    placement: dict[str, list[str]] = {}
+    matched: set[str] = set()
+    for table in schema.tables:
+        declared = set(table.carry) | set(table.columns)
+        columns = [name for name in names if name in declared]
+        if columns:
+            placement[table.name] = columns
+            matched.update(columns)
+    unmatched = sorted(set(names) - matched)
+    if unmatched:
+        raise ValueError(
+            f"real columns were declared for {unmatched}, but no table carries or "
+            "generates a column by that name. They used to be synthesized into "
+            "every table anyway, which puts donor-derived values in an export "
+            "nobody asked for; carry them somewhere, or drop the attribute"
+        )
+    return placement
+
+
+def _check_bound_names(schema: Schema) -> None:
+    """Reject a real column bound under a name other than its own.
+
+    The mode keys on the name `attribute()` was called with; the schema keys on
+    the name the rule was bound to. When they disagree the user's column comes
+    back entirely null and a phantom column holding the real-derived values
+    appears beside it, with nothing raised (#144). `real_data` mode has no
+    rename channel at all, and `scope` mode's is `variable=`, so the fix is
+    always to declare the attribute under the name it is bound to.
+    """
+    bindings = [
+        (bound, rule)
+        for entity in schema.entities
+        for bound, rule in entity.attributes.items()
+    ] + [
+        (bound, rule) for table in schema.tables for bound, rule in table.columns.items()
+    ]
+    for bound, rule in bindings:
+        if isinstance(rule, _RealDataColumn) and rule.name != bound:
+            raise ValueError(
+                f"attribute {rule.name!r} is bound as {bound!r}. The mode keys real "
+                f"columns on the name attribute() was called with, so {bound!r} would "
+                f"come back all null beside a {rule.name!r} column you never declared. "
+                f"Declare it as attribute({bound!r}) in real_data mode, or as "
+                f"attribute({bound!r}, variable=...) in scope mode"
+            )
 
 
 def _check_kwargs(
@@ -253,10 +367,15 @@ class RealDataMode(Mode):
         self._real_data_epsilon[name] = epsilon if epsilon is not None else self._epsilon
         return _RealDataColumn(name)
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _declared_columns(self) -> Sequence[str]:
+        return list(self._real_data_epsilon)
+
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         if not self._real_data_epsilon:
             return {}
-        return {"synthesizer": _epsilon_chain(self._real_data_epsilon, self._frame)}
+        return {
+            "synthesizer": _epsilon_chain(self._real_data_epsilon, self._frame, placement)
+        }
 
 
 class ScopeMode(Mode):
@@ -283,7 +402,10 @@ class ScopeMode(Mode):
         self._scope_epsilon[name] = epsilon if epsilon is not None else self._epsilon
         return _RealDataColumn(name)
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _declared_columns(self) -> Sequence[str]:
+        return list(self._variables)
+
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         if not self._variables:
             return {}
         if self._fetched is None:
@@ -304,7 +426,9 @@ class ScopeMode(Mode):
             self._fetched = pd.DataFrame(
                 {name: fetched[variable] for name, variable in self._variables.items()}
             )
-        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}
+        return {
+            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)
+        }
 
 
 class _RealDataColumn(_BaseRule):
@@ -332,18 +456,20 @@ def _empirical_cart(columns: list[str], frame: pd.DataFrame, **knobs: Any) -> CA
     the same structure-source-plus-synthesizer shape, differing only in
     where the frame came from (user-supplied vs. `fetch_pums`).
 
-    No `tables=`, deliberately. `attribute()` names a column, and the same
-    column can be carried into any number of tables declared later, so the
-    mode has no table list to scope by at this point. Unscoped is the safe
-    direction: the donor frame is the structure source for every table, so
-    each one gets the column synthesized rather than some table silently
-    keeping the placeholder.
+    `tables=` is always passed, and always names exactly one table. It was
+    unscoped once, on the reasoning that a column can be carried into any
+    number of tables declared later, so the mode had no table list at that
+    point. It does now: `schema()` resolves the placement before the pipeline
+    is built. Unscoped was not the safe direction, because
+    `_FittedCART.apply` *creates* a declared column on a chunk that lacks it,
+    so every table got every mode attribute whether or not it declared one
+    (#144).
     """
     return CARTSynthesizer(columns=columns, structure=Empirical(frame), **knobs)
 
 
 def _epsilon_chain(
-    epsilons: dict[str, float], frame: pd.DataFrame
+    epsilons: dict[str, float], frame: pd.DataFrame, placement: dict[str, list[str]]
 ) -> CARTSynthesizer | "_ChainedSynthesizer":
     """Columns grouped by their effective epsilon, one synthesizer per group.
 
@@ -351,16 +477,43 @@ def _epsilon_chain(
     per attribute, and one tree cannot carry two generalization levels, so
     columns asking for the same level are fit together and the groups are
     chained. Only the donor frame differs between the two modes.
+
+    Each group after the first conditions on every column the earlier groups
+    already produced, via `predictors=`. Without that the groups were drawn
+    independently and two attributes given different epsilons came out
+    uncorrelated: every univariate summary of the output stayed right and
+    every bivariate one was destroyed, silently (#139). Groups run in the
+    order their first attribute was declared, so the conditioning order is
+    the order the user wrote rather than an accident of float ordering.
+
+    One synthesizer per (table, epsilon group) rather than per group: a group's
+    columns need not all land on the same table, and a synthesizer carries one
+    `tables=` scope and one predictor list. Splitting by table is what keeps a
+    column out of a table that never declared it (#144) and keeps the
+    predictors to columns that table actually has.
     """
     groups: dict[float, list[str]] = {}
     for name, epsilon in epsilons.items():
         groups.setdefault(epsilon, []).append(name)
-    return _chain(
-        [
-            _empirical_cart(columns, frame, **_cart_knobs(epsilon))
-            for epsilon, columns in groups.items()
-        ]
-    )
+    synthesizers = []
+    for table_name, table_columns in placement.items():
+        conditioned: list[str] = []
+        for epsilon, columns in groups.items():
+            here = [column for column in columns if column in table_columns]
+            if not here:
+                continue
+            synthesizers.append(
+                _empirical_cart(
+                    here,
+                    frame,
+                    tables=[table_name],
+                    predictors=list(conditioned),
+                    label=_group_label(epsilon),
+                    **_cart_knobs(epsilon),
+                )
+            )
+            conditioned += here
+    return _chain(synthesizers)
 
 
 def _chain(synthesizers: list[CARTSynthesizer]) -> CARTSynthesizer | "_ChainedSynthesizer":
@@ -395,13 +548,48 @@ def _cart_knobs(epsilon: float) -> dict[str, Any]:
     library default of five. The `max(5, ...)` floor below is a guard against
     a leaf smaller than that library default; it never binds while the clamp
     ceiling is 5, since `100 / 5` is already 20.
+
+    Two limits, stated because they are measured facts about this mapping and
+    not what a reader assumes from it. What to do about either is open in #163
+    and is a maintainer call, so nothing here resolves them:
+
+    - `max_depth` and `min_samples_leaf` only reach a column that has something
+      to condition on. `_FittedCART` builds no tree for a column with no
+      predictors and no earlier column, so the first column of the first
+      epsilon group is a plain resample of the donor's own values and neither
+      knob touches it. With one attribute that is the whole output: epsilon
+      0.01 and epsilon 5.0 give byte-identical frames.
+    - `fit_cap` is the one knob that does bite there, and what it controls is
+      how many real records sit in the resample pool. Lowering epsilon
+      therefore republishes *fewer* distinct real people, each of them more
+      often (995 distinct at 0.01 vs 4788 at 5.0, on a 50k-row donor and 5k
+      output rows). That is the opposite direction from the one a knob
+      presented as a privacy dial implies.
     """
     capped = min(max(epsilon, 0.01), 5.0)
+    # Tagged as user-provided, not left a plain int. `CARTSynthesizer` reads a
+    # plain int leaf size as its own library default, so an epsilon-derived one
+    # arrived in `unjustified()` as an undefended magic number -- the one value
+    # in the run that traces straight back to something the user chose (#145).
     return {
         "max_depth": None if capped >= 5.0 else max(1, round(capped * 4)),
-        "min_samples_leaf": max(5, round(100 / capped)),
+        "min_samples_leaf": user(
+            max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
+        ),
         "fit_cap": max(1_000, round(DEFAULT_FIT_CAP * capped / 5.0)),
     }
+
+
+def _group_label(epsilon: float) -> str:
+    """The provenance/report label one epsilon group's synthesizer runs under.
+
+    Several of them reach the same table, and everything `CARTSynthesizer.run`
+    records keys on the table name, so without a label each group overwrote the
+    last and the audit trail showed one generalization level where two were
+    applied (#145). The epsilon is the label because it is what distinguishes
+    the groups, and it is what a reader of the record needs to see.
+    """
+    return f"eps{epsilon:g}"
 
 
 class _ChainedSynthesizer:

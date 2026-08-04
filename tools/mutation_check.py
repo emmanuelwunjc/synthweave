@@ -504,8 +504,8 @@ MUTATIONS = [
     (
         "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
         "src/synthweave/mode.py",
-        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
-        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+        '            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)',
+        '            "synthesizer": _empirical_cart(list(self._variables), self._fetched)',
     ),
     (
         "#89.3 scope epsilon is validated, not clamped (mode level)",
@@ -885,6 +885,59 @@ MUTATIONS = [
         "tools/check_no_private_leak.py",
         "    patterns = _UNIVERSAL_PATTERNS + _PERSONAL_PATTERNS",
         "    patterns = _UNIVERSAL_PATTERNS",
+    ),
+    (
+        "#139 later epsilon groups condition on the columns earlier ones produced",
+        "src/synthweave/mode.py",
+        "                    predictors=list(conditioned),\n",
+        "",
+    ),
+    (
+        "#144 a real column is scoped to the tables that declared it",
+        "src/synthweave/mode.py",
+        "                    tables=[table_name],\n",
+        "",
+    ),
+    (
+        "#144 a real attribute no table carries raises instead of reaching all of them",
+        "src/synthweave/mode.py",
+        """    unmatched = sorted(set(names) - matched)
+    if unmatched:
+        raise ValueError(""",
+        """    unmatched = []
+    if unmatched:
+        raise ValueError(""",
+    ),
+    (
+        "#144 a real attribute bound under another name raises, not an all-null column",
+        "src/synthweave/mode.py",
+        "        if isinstance(rule, _RealDataColumn) and rule.name != bound:",
+        "        if False:",
+    ),
+    (
+        "#145 each epsilon group records under its own provenance/report key",
+        "src/synthweave/stages/synthesize.py",
+        '        prefix = f"{table.name}.synth" + (f".{self.label}" if self.label else "")\n'
+        '        stage = "synthesize" + (f".{self.label}" if self.label else "")',
+        '        prefix = f"{table.name}.synth"\n'
+        '        stage = "synthesize"',
+    ),
+    (
+        "#145 an epsilon-derived leaf size is user-provided, not a library default",
+        "src/synthweave/mode.py",
+        """        "min_samples_leaf": user(
+            max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
+        ),""",
+        '        "min_samples_leaf": max(5, round(100 / capped)),',
+    ),
+    (
+        # The exact mutation #143 reported as invisible: epsilon becomes a total
+        # no-op. It used to fail four tests, every one of them asserting a knob
+        # value on the synthesizer object rather than anything in the output.
+        "#143 epsilon reaches the synthesized data, not only the knob values",
+        "src/synthweave/mode.py",
+        "    capped = min(max(epsilon, 0.01), 5.0)",
+        "    capped = 5.0",
     ),
 ]
 
