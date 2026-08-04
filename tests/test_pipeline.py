@@ -810,6 +810,14 @@ def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
     `score` is the load-bearing column: it is the only one whose declared type
     (`int64`) differs from the `object` an empty frame defaults to, so a test
     without it cannot tell the two apart.
+
+    The claim is limited to the columns whose rule names a type, and the limit
+    is real rather than an oversight. A rule that declares nothing (an
+    identifier, a `Choice` over strings) leaves the populated case's type to
+    pandas' inference over the values, and zero rows offer nothing to infer
+    from. pandas 3 makes that visible: it reads a populated text column as
+    `str` and an empty object column as `object`, and no amount of care in the
+    empty branch can guess the first from the second.
     """
     person = sw.Entity(
         "person",
@@ -839,7 +847,9 @@ def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
     ).run()["t"]
 
     assert len(empty) == 0 and len(non_empty) > 0
-    assert list(empty.dtypes.items()) == list(non_empty.dtypes.items())
+    assert [empty[c].dtype for c in columns] == [non_empty[c].dtype for c in columns], (
+        f"empty {empty.dtypes.to_dict()} vs non-empty {non_empty.dtypes.to_dict()}"
+    )
 
 
 # --- edge cases that turned out to be sound ---------------------------------
