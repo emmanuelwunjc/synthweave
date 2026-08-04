@@ -29,8 +29,12 @@ dist/
 venv/
 
 # Secrets. Never committed, read at runtime by src/synthweave/connectors/.
+# The glob matters: `.env` and `.env.local` alone left `.env.test`,
+# `.env.production` and every other suffix trackable, in a repo whose one
+# real secret (CENSUS_API_KEY) lives in exactly those files.
 .env
-.env.local
+.env.*
+.envrc
 
 # Cached connector responses (e.g. ACS PUMS), regenerable from the API.
 .synthweave_cache/
