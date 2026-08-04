@@ -442,6 +442,32 @@ MUTATIONS = [
         "    registry._restore(snapshot)",
         "    pass",
     ),
+    (
+        "#60 PackageNotFoundError stays out of the public namespace",
+        "src/synthweave/__init__.py",
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import PackageNotFoundError\n"
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+    ),
+    (
+        "#63 faker_names validates Faker's private provider shape",
+        "src/synthweave/connectors/faker_names.py",
+        "    pool: Any = _checked_provider_pool(Provider, attr)",
+        "    pool: Any = getattr(Provider, attr)",
+    ),
+    (
+        "#63 faker_names weight check separates non-numeric, non-finite and non-positive",
+        "src/synthweave/connectors/faker_names.py",
+        '        if not isinstance(weight, numbers.Real) or isinstance(weight, bool):\n'
+        '            raise bad(f"has a non-numeric weight {weight!r} for {name!r}")\n'
+        "        if not math.isfinite(weight):\n"
+        '            raise bad(f"has a non-finite weight {weight!r} for {name!r}")\n'
+        "        if not weight > 0:",
+        "        if not isinstance(weight, (int, float)) or isinstance(weight, bool)"
+        " or not weight > 0:",
+    ),
 ]
 
 
