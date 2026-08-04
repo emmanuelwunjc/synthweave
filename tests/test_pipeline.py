@@ -909,6 +909,41 @@ def _corrupted_share(pairs: list[tuple[str, str]], value: str) -> float:
     return sum(c != d for c, d in rows) / len(rows)
 
 
+def _single_character_mistype(original: str, corrupted: str) -> str | None:
+    """Name the one-character mistype turning `original` into `corrupted`.
+
+    There are exactly three ways to mistype one character, and `Typo` is
+    allowed all three: strike the wrong key (substitution), strike two keys in
+    the wrong order (transposition), or strike one twice (duplication). The
+    keyboard-map path only ever produces the first; the map-free fallback for
+    scripts the layout does not cover produces the other two.
+
+    `None` means the value was not mistyped, it was mangled, which is what
+    byte-oriented indexing produces: slicing or re-decoding a multi-byte
+    character scrambles the characters around it rather than mistyping one.
+    Naming the edit rather than counting differing positions is what lets this
+    stay a real oracle across both paths instead of being relaxed to
+    "something changed".
+    """
+    if len(corrupted) == len(original):
+        differing = [i for i, (a, b) in enumerate(zip(original, corrupted)) if a != b]
+        if len(differing) == 1:
+            return "substitution"
+        if len(differing) == 2 and differing[1] == differing[0] + 1:
+            i, j = differing
+            if (corrupted[i], corrupted[j]) == (original[j], original[i]):
+                return "transposition"
+        return None
+    if len(corrupted) == len(original) + 1:
+        for i in range(len(corrupted)):
+            if corrupted[:i] + corrupted[i + 1 :] != original:
+                continue
+            adjacent = {corrupted[k] for k in (i - 1, i + 1) if 0 <= k < len(corrupted)}
+            if corrupted[i] in adjacent:
+                return "duplication"
+    return None
+
+
 def test_typo_corrupts_non_ascii_values_without_breaking():
     """Character indexing must be by character, not by byte.
 
@@ -917,12 +952,15 @@ def test_typo_corrupts_non_ascii_values_without_breaking():
     look at *how* a value changed, only that it was no longer one of three
     literals -- which is exactly what mojibake also looks like.
 
-    So: a value is corrupted at a real rate, and a corrupted value is still
-    the same string with one character swapped. `Typo` documents itself as
-    replacing one character with a keyboard neighbour, so the character count
-    must survive and exactly one position may differ. Byte-oriented handling
-    breaks both: slicing or re-decoding a multi-byte character changes the
-    length and scrambles the characters around it.
+    So: a value is corrupted at a real rate, and a corrupted value is the same
+    string with exactly one character mistyped. The second claim is asserted
+    through `_single_character_mistype`, which names the edit rather than
+    counting differing positions. Counting was wrong twice over: it hardcoded
+    the keyboard-map path's substitution as the only legal edit, so the #81
+    fix for scripts the layout does not cover (transposition, and duplication
+    when a transposition would change nothing) would turn this red for
+    behaviour that is correct. Naming the edit keeps the oracle exact under
+    both paths, and mojibake is still none of the three.
 
     `Ünüver` is the value used here because it is the only one this can
     currently assert a corruption rate for. That is #81, not a property of
@@ -933,14 +971,11 @@ def test_typo_corrupts_non_ascii_values_without_breaking():
 
     changed = [(c, d) for c, d in pairs if c != d]
     for original, corrupted in changed:
-        assert len(corrupted) == len(original), (
-            f"{original!r} became {corrupted!r}: {len(original)} characters became "
-            f"{len(corrupted)}, so it was sliced by byte rather than by character"
-        )
-        differing = [i for i, (a, b) in enumerate(zip(original, corrupted)) if a != b]
-        assert len(differing) == 1, (
-            f"{original!r} became {corrupted!r}: {len(differing)} characters differ, "
-            f"and a typo replaces exactly one"
+        assert _single_character_mistype(original, corrupted) is not None, (
+            f"{original!r} became {corrupted!r}, which is no one-character mistype "
+            f"of it: {len(original)} characters became {len(corrupted)} and the "
+            f"result is neither a substitution, a transposition nor a duplication, "
+            f"so the value was indexed by byte rather than by character"
         )
 
     # ~0.4 in practice: half the rows are eligible and two of `Ünüver`'s six
