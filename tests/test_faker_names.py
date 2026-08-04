@@ -139,3 +139,102 @@ def _pool(which: str):
     from synthweave.connectors.faker_names import _name_pool
 
     return _name_pool(which)
+
+
+def test_unweighted_provider_attribute_is_rejected_by_name(monkeypatch):
+    """A Faker version that turns a weighted dict into a plain list must fail loudly.
+
+    `Provider.first_names` and friends are Faker internals, not public API, so
+    their shape can change with no deprecation. Silently falling back to
+    unweighted picks would keep the pipeline green while quietly dropping the
+    US name frequency weighting the whole module exists to provide.
+    """
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", ["Aaron", "Adam"], raising=True)
+    with pytest.raises(RuntimeError, match="first_names"):
+        Name("first_name")
+
+
+def test_missing_provider_attribute_names_the_attribute_and_the_version(monkeypatch):
+    """A removed internal must not surface as a bare AttributeError.
+
+    Substitutes the whole provider class, because the attribute is also defined
+    on Faker's base person provider: deleting it from `en_US` alone would fall
+    back to the base one rather than being absent.
+    """
+
+    class ProviderWithoutLastNames:
+        first_names = {"Aaron": 1.0}
+        first_names_female = {"April": 1.0}
+        first_names_male = {"Aaron": 1.0}
+
+    monkeypatch.setattr("faker.providers.person.en_US.Provider", ProviderWithoutLastNames)
+    with pytest.raises(RuntimeError) as excinfo:
+        Name("last_name")
+    message = str(excinfo.value)
+    assert "last_names" in message
+    assert "Faker>=20,<41" in message
+
+
+def test_empty_provider_mapping_is_rejected(monkeypatch):
+    """An empty pool would make every drawn name identical or crash inside `pick`."""
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "last_names", {}, raising=True)
+    with pytest.raises(RuntimeError, match="last_names"):
+        Name("last_name")
+
+
+@pytest.mark.parametrize(
+    "weight, problem",
+    [
+        (0.0, "non-positive"),
+        (-1.0, "non-positive"),
+        ("0.01", "non-numeric"),
+        (None, "non-numeric"),
+        (True, "non-numeric"),
+        (float("inf"), "non-finite"),
+        (float("nan"), "non-finite"),
+    ],
+)
+def test_unusable_weight_is_rejected_and_the_message_says_why(monkeypatch, weight, problem):
+    """Weights must be finite positive numbers, and the error must say which rule broke.
+
+    `pick` divides by their sum, so a non-finite weight is as unusable as a
+    negative one: `_hash.pick` rejects it with a bare `ValueError` that names
+    neither Faker nor the attribute, which is the failure mode this guard
+    exists to replace. Reporting a string or `None` as a "non-positive weight"
+    would be a factually wrong diagnostic in the one code path whose only job
+    is to diagnose.
+    """
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", {"Aaron": 1.0, "Adam": weight}, raising=True)
+    with pytest.raises(RuntimeError) as excinfo:
+        Name("first_name")
+    message = str(excinfo.value)
+    assert "first_names" in message
+    assert problem in message
+
+
+@pytest.mark.parametrize("weight", [np.float32(0.5), np.int64(2), np.float64(0.25)])
+def test_numpy_scalar_weights_are_accepted(monkeypatch, weight):
+    """Real numeric types other than `float` must not be mistaken for a shape break.
+
+    The guard's job is to catch Faker changing shape, not to reject a weight
+    that is a perfectly usable number `numpy` happens to own.
+    """
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", {"Aaron": 1.0, "Adam": weight}, raising=True)
+    values, weights = _pool("first_name")
+    assert len(values) == len(weights) == 2
+    assert (weights > 0).all()
+
+
+def test_valid_provider_data_still_builds_a_weighted_pool():
+    """The guard must not reject the real Faker data it is meant to protect."""
+    values, weights = _pool("first_name")
+    assert len(values) == len(weights) > 0
+    assert (weights > 0).all()
