@@ -939,6 +939,16 @@ MUTATIONS = [
         "    capped = min(max(epsilon, 0.01), 5.0)",
         "    capped = 5.0",
     ),
+    # A non-release tag sharing the release commit (this repo had
+    # `archive/bug-hunt`) makes `git describe --exact-match` return it, which
+    # `previous_tag` rejects. That step runs before the PyPI publish, so the
+    # whole release stops for a tag that has nothing to do with releasing.
+    (
+        "R1 release notes derive the current tag from v* tags only",
+        "tools/release_notes.py",
+        '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
+        '    current = _git("describe", "--tags", "--exact-match").strip()',
+    ),
 ]
 
 
