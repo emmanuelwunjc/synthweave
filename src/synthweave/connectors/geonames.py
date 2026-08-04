@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import csv
 import io
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -41,6 +39,8 @@ import numpy as np
 import pandas as pd
 
 from .. import _hash
+from ._fetch import cached_dataframe
+from ._fetch import fetch_url as _fetch_url
 
 _URL = "https://download.geonames.org/export/zip/US.zip"
 _MEMBER = "US.txt"
@@ -106,21 +106,9 @@ class USAddress:
 
 def _postal_data(cache_dir: str | Path | None) -> pd.DataFrame:
     memo_key = "<none>" if cache_dir is None else str(Path(cache_dir))
-    if memo_key in _cache:
-        return _cache[memo_key]
-
-    cache_path = None if cache_dir is None else Path(cache_dir) / "us_postal.csv"
-    if cache_path is not None and cache_path.exists():
-        frame = pd.read_csv(cache_path, dtype=str)
-        _cache[memo_key] = frame
-        return frame
-
-    frame = _fetch_and_parse()
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(cache_path, index=False)
-    _cache[memo_key] = frame
-    return frame
+    return cached_dataframe(
+        _cache, memo_key, cache_dir, "us_postal.csv", _fetch_and_parse, dtype=str
+    )
 
 
 def _parse_postal_tsv(raw: str) -> list[list[str]]:
@@ -137,13 +125,7 @@ def _parse_postal_tsv(raw: str) -> list[list[str]]:
 
 
 def _fetch_and_parse() -> pd.DataFrame:
-    try:
-        with urllib.request.urlopen(_URL, timeout=60) as response:
-            if response.status != 200:
-                raise RuntimeError(f"GeoNames request failed with HTTP {response.status}: {_URL}")
-            body = response.read()
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"GeoNames request failed: {_URL} ({e})") from e
+    body = _fetch_url(_URL, timeout=60, label="GeoNames")
 
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         raw = archive.read(_MEMBER).decode("utf-8")

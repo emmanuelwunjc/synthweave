@@ -14,17 +14,18 @@ on:
 jobs:
   conventional:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Title must be a Conventional Commit subject
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           echo "title: $TITLE"
-          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|chore|docs|refactor|test|perf)(\([a-z0-9._/-]+\))?!?: .+'; then
+          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|chore|docs|refactor|test|perf|ci|build)(\([a-z0-9._/-]+\))?!?: .+'; then
             echo "OK"
           else
             echo "::error::PR title must be '<type>(<scope>): description'." \
-                 "Allowed types: feat, fix, chore, docs, refactor, test, perf." \
+                 "Allowed types: feat, fix, chore, docs, refactor, test, perf, ci, build." \
                  "The title becomes the squash commit on main and appears in the" \
                  "release notes, so it is permanent."
             exit 1

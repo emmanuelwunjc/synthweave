@@ -27,8 +27,14 @@ Issues = "https://github.com/emmanuelwunjc/synthweave/issues"
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=12"]
-pii = ["Faker>=20"]
-dev = ["pytest>=7", "pyarrow>=12", "pyflakes>=3", "Faker>=20"]
+# The Faker upper bound is capped at the current major (40) because
+# `connectors/faker_names.py` reads Faker's private provider attributes
+# (`Provider.first_names` and friends) for its frequency weights. No break is
+# known; the bound exists because a private attribute can change shape in any
+# release with no deprecation path. Raise it once a new major is checked
+# against `_checked_provider_pool`, and keep `_FAKER_SUPPORTED` in step.
+pii = ["Faker>=20,<41"]
+dev = ["pytest>=7", "pyarrow>=12", "pyflakes>=3", "Faker>=20,<41"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/synthweave"]
