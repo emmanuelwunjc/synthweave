@@ -13,10 +13,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
+import pandas as pd
+
 from .pipeline import Pipeline, PipelineResult
-from .rules import Choice, Normal, Rule, Uniform
+from .rules import Choice, Normal, Rule, Uniform, _BaseRule
 from .schema import Entity, Schema, Table
 from .stages.noise import Missing, Noise, NoiseOp, OCR, Typo
+from .stages.synthesize import DEFAULT_FIT_CAP, CARTSynthesizer, Empirical
 
 _NOISE_RATE_KWARGS = ("missing_rate", "typo_rate", "ocr_rate")
 _NOISE_OP_BY_KWARG = {"missing_rate": Missing, "typo_rate": Typo, "ocr_rate": OCR}
@@ -31,6 +35,22 @@ class Mode:
     @staticmethod
     def metadata() -> "MetadataMode":
         return MetadataMode()
+
+    @staticmethod
+    def real_data(source: pd.DataFrame | str | Path, *, epsilon: float = 1.0) -> "RealDataMode":
+        """Real microdata the user supplies, synthesized via CART.
+
+        `source` is a `pd.DataFrame`, or a path to a `.csv`/`.parquet` file.
+
+        `epsilon` is NOT differential privacy: no Laplace/Gaussian mechanism
+        and no privacy accounting exist in this codebase. It is a convenience
+        knob mapped onto `CARTSynthesizer`'s existing, already-correct
+        generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
+        which is real and effective but not a formal privacy guarantee. See
+        `_cart_knobs` for the mapping.
+        """
+        _check_epsilon(epsilon, "real_data")
+        return RealDataMode(_load_source(source), epsilon=epsilon)
 
     def attribute(self, name: str, **kwargs: Any) -> Rule:
         noise_kwargs = {k: kwargs.pop(k) for k in _NOISE_RATE_KWARGS if k in kwargs}
@@ -174,6 +194,136 @@ class MetadataMode(Mode):
             f"attribute {name!r}: cannot resolve a rule from {sorted(kwargs)}; "
             "give min/max, mean/sd (distribution=\"normal\"), or values"
         )
+
+
+class RealDataMode(Mode):
+    """Real microdata the user supplies, synthesized via Empirical + CART."""
+
+    def __init__(self, frame: pd.DataFrame, *, epsilon: float) -> None:
+        super().__init__()
+        self._frame = frame
+        self._epsilon = epsilon
+        self._real_data_epsilon: dict[str, float] = {}
+
+    def _build_rule(self, name: str, **kwargs: Any) -> Rule:
+        # Take **kwargs rather than a keyword-only `epsilon` so a stray kwarg
+        # is answered by name, the way MetadataMode answers one. A narrow
+        # signature would surface Python's own TypeError instead, which leaks
+        # this private method's name at the caller's line.
+        epsilon = kwargs.pop("epsilon", None)
+        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: real_data mode takes only epsilon, got "
+                f"{sorted(kwargs)}; the column's distribution comes from the "
+                "donor frame, not from a declared rule"
+            )
+        if epsilon is not None:
+            _check_epsilon(epsilon, f"attribute {name!r}")
+        self._real_data_epsilon[name] = epsilon if epsilon is not None else self._epsilon
+        return _RealDataColumn(name)
+
+    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+        if not self._real_data_epsilon:
+            return {}
+        groups: dict[float, list[str]] = {}
+        for name, eps in self._real_data_epsilon.items():
+            groups.setdefault(eps, []).append(name)
+        # No `tables=`, deliberately. `attribute()` names a column, and the
+        # same column can be carried into any number of tables declared later,
+        # so the mode has no table list to scope by at this point. Unscoped is
+        # the safe direction: the donor frame is the structure source for
+        # every table, so each one gets the column synthesized rather than
+        # some table silently keeping the placeholder.
+        synthesizers = [
+            CARTSynthesizer(columns=columns, structure=Empirical(self._frame), **_cart_knobs(eps))
+            for eps, columns in groups.items()
+        ]
+        synthesizer = synthesizers[0] if len(synthesizers) == 1 else _ChainedSynthesizer(synthesizers)
+        return {"synthesizer": synthesizer}
+
+
+class _RealDataColumn(_BaseRule):
+    """Placeholder for a real_data-sourced column.
+
+    Sits in an `Entity`'s attributes or a `Table`'s columns like any other
+    `Rule` so `entity()`/`table()` need no special casing, but its `draw()`
+    is never meant to survive a real run: the `CARTSynthesizer` built by
+    `RealDataMode._extra_pipeline_kwargs()` overwrites the column entirely
+    once fitted on the donor frame.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def draw(self, keys, *, seed, salt, frame=None):
+        return np.full(len(keys), None, dtype=object)
+
+
+def _check_epsilon(epsilon: float, where: str) -> None:
+    """Reject a non-positive epsilon where the caller wrote it.
+
+    `_cart_knobs` clamps its input, so 0 and -1 would otherwise become 0.01
+    and produce the most generalized column the mapping can make. That is a
+    plausible-looking result for what is really a typo, so it is caught at
+    `real_data()`/`attribute()` instead: those are the lines the user wrote.
+    """
+    if epsilon <= 0:
+        raise ValueError(f"{where}: epsilon must be positive, got {epsilon!r}")
+
+
+def _cart_knobs(epsilon: float) -> dict[str, Any]:
+    """`epsilon` -> `CARTSynthesizer`'s generalization knobs.
+
+    Not differential privacy: no Laplace/Gaussian mechanism, no privacy
+    accounting. Lower epsilon asks for more generalization (shallower trees,
+    bigger leaves, a smaller fit sample), matching `CARTSynthesizer`'s own
+    documented claim that shallow trees generalize more and disclose less.
+    Monotonic in epsilon, clamped to (0, 5]. At 5 and above the knobs are
+    `max_depth=None`, `min_samples_leaf=20`, `fit_cap=DEFAULT_FIT_CAP`. Depth
+    and fit cap do reach `CARTSynthesizer`'s own defaults there, but the leaf
+    size does not: real_data always fits on real microdata, so the most
+    permissive setting still asks for leaves twenty rows wide rather than the
+    library default of five. The `max(5, ...)` floor below is a guard against
+    a leaf smaller than that library default; it never binds while the clamp
+    ceiling is 5, since `100 / 5` is already 20.
+    """
+    capped = min(max(epsilon, 0.01), 5.0)
+    return {
+        "max_depth": None if capped >= 5.0 else max(1, round(capped * 4)),
+        "min_samples_leaf": max(5, round(100 / capped)),
+        "fit_cap": max(1_000, round(DEFAULT_FIT_CAP * capped / 5.0)),
+    }
+
+
+class _ChainedSynthesizer:
+    """Applies more than one `CARTSynthesizer` to the same table in sequence.
+
+    A `Pipeline` has one synthesizer slot; a mode with real_data columns at
+    different epsilons needs one `CARTSynthesizer` per epsilon group; two
+    generalization levels cannot be fit as a single tree, so this chains
+    the resulting synthesizers instead.
+    """
+
+    def __init__(self, synthesizers: list[CARTSynthesizer]) -> None:
+        self.synthesizers = list(synthesizers)
+
+    def run(self, chunks, table, ctx):
+        for synthesizer in self.synthesizers:
+            chunks = synthesizer.run(chunks, table, ctx)
+        return chunks
+
+
+def _load_source(source: pd.DataFrame | str | Path) -> pd.DataFrame:
+    if isinstance(source, pd.DataFrame):
+        return source
+    path = Path(source)
+    if path.suffix == ".csv":
+        return pd.read_csv(path)
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    raise ValueError(
+        f"{path}: real_data source must be a .csv or .parquet file, got {path.suffix!r}"
+    )
 
 
 class ModeSchema:
