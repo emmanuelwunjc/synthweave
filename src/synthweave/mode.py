@@ -10,6 +10,7 @@ by hand.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -132,13 +133,26 @@ class Mode:
 
     def schema(self, *, entities: list[Entity], tables: list[Table], seed: int | str) -> "ModeSchema":
         schema = Schema(entities=entities, tables=tables, seed=seed)
-        # The noise map resolves now: an unmatched rate is a declaration
-        # mistake, so it should surface on the call that declared it. The
-        # pipeline builder goes across uncalled. `ScopeMode` fetches real rows
-        # off the network inside it, and a fetch (or a ValueError for an area
-        # code the connector does not recognize) belongs on `.run()`, not on a
-        # call that otherwise only assembles objects.
-        return ModeSchema(schema, self._noise_for(schema), self._extra_pipeline_kwargs)
+        # The noise map and the real-column placement resolve now: an unmatched
+        # name is a declaration mistake either way, so it should surface on the
+        # call that declared it. The pipeline builder goes across uncalled.
+        # `ScopeMode` fetches real rows off the network inside it, and a fetch
+        # (or a ValueError for an area code the connector does not recognize)
+        # belongs on `.run()`, not on a call that otherwise only assembles
+        # objects.
+        placement = _placement(self._declared_columns(), schema)
+        return ModeSchema(
+            schema,
+            self._noise_for(schema),
+            partial(self._extra_pipeline_kwargs, placement),
+        )
+
+    def _declared_columns(self) -> Sequence[str]:
+        """Columns this mode synthesizes from real donor rows, in declaration order.
+
+        Empty for `MetadataMode`, which has no donor and no synthesizer.
+        """
+        return ()
 
     def _noise_for(self, schema: Schema) -> dict[str, dict[str, list[NoiseOp]]]:
         """Match every recorded noise rate against the schema's real columns.
@@ -171,8 +185,75 @@ class Mode:
             )
         return noise
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         return {}
+
+
+def _placement(names: Sequence[str], schema: Schema) -> dict[str, list[str]]:
+    """Which of `names` each table actually declares, keyed by table name.
+
+    Two silent failures live here, and both are the same shape as the noise
+    one `_noise_for` already catches: a name the user wrote that nothing in the
+    schema answers to.
+
+    - A real column used to be synthesized into *every* table, because the
+      synthesizer was built unscoped and `_FittedCART.apply` creates a declared
+      column on a chunk that lacks it rather than skipping. A table carrying
+      nothing from the donor came back holding every mode attribute (#144).
+    - An attribute nobody carried was synthesized anyway, into all of them.
+
+    Returned in declaration order per table, which is the order `_epsilon_chain`
+    then conditions in.
+    """
+    names = list(names)
+    if not names:
+        return {}
+    _check_bound_names(schema)
+    placement: dict[str, list[str]] = {}
+    matched: set[str] = set()
+    for table in schema.tables:
+        declared = set(table.carry) | set(table.columns)
+        columns = [name for name in names if name in declared]
+        if columns:
+            placement[table.name] = columns
+            matched.update(columns)
+    unmatched = sorted(set(names) - matched)
+    if unmatched:
+        raise ValueError(
+            f"real columns were declared for {unmatched}, but no table carries or "
+            "generates a column by that name. They used to be synthesized into "
+            "every table anyway, which puts donor-derived values in an export "
+            "nobody asked for; carry them somewhere, or drop the attribute"
+        )
+    return placement
+
+
+def _check_bound_names(schema: Schema) -> None:
+    """Reject a real column bound under a name other than its own.
+
+    The mode keys on the name `attribute()` was called with; the schema keys on
+    the name the rule was bound to. When they disagree the user's column comes
+    back entirely null and a phantom column holding the real-derived values
+    appears beside it, with nothing raised (#144). `real_data` mode has no
+    rename channel at all, and `scope` mode's is `variable=`, so the fix is
+    always to declare the attribute under the name it is bound to.
+    """
+    bindings = [
+        (bound, rule)
+        for entity in schema.entities
+        for bound, rule in entity.attributes.items()
+    ] + [
+        (bound, rule) for table in schema.tables for bound, rule in table.columns.items()
+    ]
+    for bound, rule in bindings:
+        if isinstance(rule, _RealDataColumn) and rule.name != bound:
+            raise ValueError(
+                f"attribute {rule.name!r} is bound as {bound!r}. The mode keys real "
+                f"columns on the name attribute() was called with, so {bound!r} would "
+                f"come back all null beside a {rule.name!r} column you never declared. "
+                f"Declare it as attribute({bound!r}) in real_data mode, or as "
+                f"attribute({bound!r}, variable=...) in scope mode"
+            )
 
 
 def _check_kwargs(
@@ -263,10 +344,15 @@ class RealDataMode(Mode):
         self._real_data_epsilon[name] = epsilon if epsilon is not None else self._epsilon
         return _RealDataColumn(name)
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _declared_columns(self) -> Sequence[str]:
+        return list(self._real_data_epsilon)
+
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         if not self._real_data_epsilon:
             return {}
-        return {"synthesizer": _epsilon_chain(self._real_data_epsilon, self._frame)}
+        return {
+            "synthesizer": _epsilon_chain(self._real_data_epsilon, self._frame, placement)
+        }
 
 
 class ScopeMode(Mode):
@@ -293,7 +379,10 @@ class ScopeMode(Mode):
         self._scope_epsilon[name] = epsilon if epsilon is not None else self._epsilon
         return _RealDataColumn(name)
 
-    def _extra_pipeline_kwargs(self) -> dict[str, Any]:
+    def _declared_columns(self) -> Sequence[str]:
+        return list(self._variables)
+
+    def _extra_pipeline_kwargs(self, placement: dict[str, list[str]]) -> dict[str, Any]:
         if not self._variables:
             return {}
         if self._fetched is None:
@@ -314,7 +403,9 @@ class ScopeMode(Mode):
             self._fetched = pd.DataFrame(
                 {name: fetched[variable] for name, variable in self._variables.items()}
             )
-        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}
+        return {
+            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)
+        }
 
 
 class _RealDataColumn(_BaseRule):
@@ -342,18 +433,20 @@ def _empirical_cart(columns: list[str], frame: pd.DataFrame, **knobs: Any) -> CA
     the same structure-source-plus-synthesizer shape, differing only in
     where the frame came from (user-supplied vs. `fetch_pums`).
 
-    No `tables=`, deliberately. `attribute()` names a column, and the same
-    column can be carried into any number of tables declared later, so the
-    mode has no table list to scope by at this point. Unscoped is the safe
-    direction: the donor frame is the structure source for every table, so
-    each one gets the column synthesized rather than some table silently
-    keeping the placeholder.
+    `tables=` is always passed, and always names exactly one table. It was
+    unscoped once, on the reasoning that a column can be carried into any
+    number of tables declared later, so the mode had no table list at that
+    point. It does now: `schema()` resolves the placement before the pipeline
+    is built. Unscoped was not the safe direction, because
+    `_FittedCART.apply` *creates* a declared column on a chunk that lacks it,
+    so every table got every mode attribute whether or not it declared one
+    (#144).
     """
     return CARTSynthesizer(columns=columns, structure=Empirical(frame), **knobs)
 
 
 def _epsilon_chain(
-    epsilons: dict[str, float], frame: pd.DataFrame
+    epsilons: dict[str, float], frame: pd.DataFrame, placement: dict[str, list[str]]
 ) -> CARTSynthesizer | "_ChainedSynthesizer":
     """Columns grouped by their effective epsilon, one synthesizer per group.
 
@@ -369,19 +462,33 @@ def _epsilon_chain(
     every bivariate one was destroyed, silently (#139). Groups run in the
     order their first attribute was declared, so the conditioning order is
     the order the user wrote rather than an accident of float ordering.
+
+    One synthesizer per (table, epsilon group) rather than per group: a group's
+    columns need not all land on the same table, and a synthesizer carries one
+    `tables=` scope and one predictor list. Splitting by table is what keeps a
+    column out of a table that never declared it (#144) and keeps the
+    predictors to columns that table actually has.
     """
     groups: dict[float, list[str]] = {}
     for name, epsilon in epsilons.items():
         groups.setdefault(epsilon, []).append(name)
     synthesizers = []
-    conditioned: list[str] = []
-    for epsilon, columns in groups.items():
-        synthesizers.append(
-            _empirical_cart(
-                columns, frame, predictors=list(conditioned), **_cart_knobs(epsilon)
+    for table_name, table_columns in placement.items():
+        conditioned: list[str] = []
+        for epsilon, columns in groups.items():
+            here = [column for column in columns if column in table_columns]
+            if not here:
+                continue
+            synthesizers.append(
+                _empirical_cart(
+                    here,
+                    frame,
+                    tables=[table_name],
+                    predictors=list(conditioned),
+                    **_cart_knobs(epsilon),
+                )
             )
-        )
-        conditioned += columns
+            conditioned += here
     return _chain(synthesizers)
 
 

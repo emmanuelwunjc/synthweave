@@ -441,8 +441,8 @@ MUTATIONS = [
     (
         "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
         "src/synthweave/mode.py",
-        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
-        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+        '            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)',
+        '            "synthesizer": _empirical_cart(list(self._variables), self._fetched)',
     ),
     (
         "#89.3 scope epsilon is validated, not clamped (mode level)",
@@ -711,8 +711,37 @@ MUTATIONS = [
     (
         "#139 later epsilon groups condition on the columns earlier ones produced",
         "src/synthweave/mode.py",
-        "                columns, frame, predictors=list(conditioned), **_cart_knobs(epsilon)",
-        "                columns, frame, **_cart_knobs(epsilon)",
+        "                    predictors=list(conditioned),\n",
+        "",
+    ),
+    (
+        "#144 a real column is scoped to the tables that declared it",
+        "src/synthweave/mode.py",
+        """                    here,
+                    frame,
+                    tables=[table_name],
+                    predictors=list(conditioned),
+                    **_cart_knobs(epsilon),""",
+        """                    here,
+                    frame,
+                    predictors=list(conditioned),
+                    **_cart_knobs(epsilon),""",
+    ),
+    (
+        "#144 a real attribute no table carries raises instead of reaching all of them",
+        "src/synthweave/mode.py",
+        """    unmatched = sorted(set(names) - matched)
+    if unmatched:
+        raise ValueError(""",
+        """    unmatched = []
+    if unmatched:
+        raise ValueError(""",
+    ),
+    (
+        "#144 a real attribute bound under another name raises, not an all-null column",
+        "src/synthweave/mode.py",
+        "        if isinstance(rule, _RealDataColumn) and rule.name != bound:",
+        "        if False:",
     ),
 ]
 

@@ -285,7 +285,7 @@ def test_two_attributes_at_the_same_epsilon_share_one_synthesizer(donor_frame):
     m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
     m.attribute("wage")
     m.attribute("age")
-    synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+    synthesizer = m._extra_pipeline_kwargs({"roster": ["wage", "age"]})["synthesizer"]
     assert isinstance(synthesizer, sw.CARTSynthesizer)
     assert set(synthesizer.columns) == {"wage", "age"}
 
@@ -294,7 +294,7 @@ def test_two_attributes_at_different_epsilons_get_two_synthesizers(donor_frame):
     m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
     m.attribute("wage", epsilon=0.5)
     m.attribute("age", epsilon=2.0)
-    synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+    synthesizer = m._extra_pipeline_kwargs({"roster": ["wage", "age"]})["synthesizer"]
     assert not isinstance(synthesizer, sw.CARTSynthesizer)
     assert len(synthesizer.synthesizers) == 2
     assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
@@ -417,7 +417,7 @@ def test_scope_generalizes_the_fetched_rows_by_epsilon():
     m.attribute("wage", variable="PINCP")
 
     with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
-        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+        synthesizer = m._extra_pipeline_kwargs({"roster": ["wage"]})["synthesizer"]
 
     # epsilon 0.5 asks for a shallow tree, not CART's unbounded default.
     assert synthesizer.max_depth == 2
@@ -428,7 +428,7 @@ def test_scope_attribute_epsilon_overrides_the_mode_level_default():
     m.attribute("wage", variable="PINCP", epsilon=1.0)
 
     with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
-        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+        synthesizer = m._extra_pipeline_kwargs({"roster": ["wage"]})["synthesizer"]
 
     assert synthesizer.max_depth == 4
 
@@ -439,7 +439,7 @@ def test_scope_attributes_at_different_epsilons_get_two_synthesizers():
     m.attribute("age", variable="AGEP", epsilon=2.0)
 
     with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
-        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+        synthesizer = m._extra_pipeline_kwargs({"roster": ["wage", "age"]})["synthesizer"]
 
     assert not isinstance(synthesizer, sw.CARTSynthesizer)
     assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
@@ -584,3 +584,57 @@ def test_two_attributes_at_different_epsilons_keep_the_donors_joint_structure(
     assert got["HS"] == pytest.approx(donor["HS"], rel=0.05), (
         f"mixed epsilons lost the education/wage relationship: {got} vs donor {donor}"
     )
+
+
+# --- sw.Mode.real_data(): an attribute lands only where it was declared ----
+
+
+def test_a_real_data_column_stays_out_of_a_table_that_did_not_declare_it(donor_frame):
+    """#144a: the synthesizer used to be unscoped and `apply` creates columns.
+
+    Asserts the output frames, not the synthesizer's `tables` set: a table that
+    carries nothing from the donor used to come back holding every mode
+    attribute, so a user exporting it shipped real-derived values they never
+    asked for.
+    """
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    wage = m.attribute("wage")
+    age = m.attribute("age")
+    person = m.entity("person", count=50, attributes={"wage": wage, "age": age})
+    wages = m.table("wages", grain="person", carry=["wage"])
+    ages = m.table("ages", grain="person", carry=["age"])
+
+    result = m.schema(entities=[person], tables=[wages, ages], seed=1).run()
+
+    assert "age" not in result["wages"].columns
+    assert "wage" not in result["ages"].columns
+
+
+def test_a_real_data_attribute_no_table_carries_raises_naming_it(donor_frame):
+    """#144a: declared and never carried used to be injected into every table."""
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    wage = m.attribute("wage")
+    age = m.attribute("age")
+    person = m.entity("person", count=10, attributes={"wage": wage, "age": age})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with pytest.raises(ValueError, match="age"):
+        m.schema(entities=[person], tables=[table], seed=1).run()
+
+
+def test_binding_a_real_data_attribute_under_another_name_raises_naming_both(
+    donor_frame,
+):
+    """#144b: the mode keys on the source column, the schema on the bound name.
+
+    The two used to disagree in silence: the user's column came back entirely
+    null and a phantom column carrying the real-derived values appeared beside
+    it. Asserts the raise, and the message has to name both halves so the fix
+    is obvious from the traceback.
+    """
+    m = sw.Mode.real_data(source=donor_frame, epsilon=1.0)
+    person = m.entity("person", count=10, attributes={"salary": m.attribute("wage")})
+    table = m.table("roster", grain="person", carry=["salary"])
+
+    with pytest.raises(ValueError, match="salary.*wage|wage.*salary"):
+        m.schema(entities=[person], tables=[table], seed=1).run()
