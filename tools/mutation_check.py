@@ -150,8 +150,11 @@ MUTATIONS = [
     (
         "I13 empty table keeps its declared columns",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame()",
+        # `_concat`'s stand-in frame moved out to `Pipeline._empty_frame` with
+        # the #82 dtype fix. Same fix, same revert: hand back a frame with no
+        # columns and see whether the suite notices.
+        "        return empty\n",
+        "        return pd.DataFrame()\n",
     ),
     (
         "I14 identifier width vs population",
@@ -569,6 +572,18 @@ MUTATIONS = [
         "src/synthweave/stages/synthesize.py",
         "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
         "",
+    ),
+    (
+        "#82 an empty table keeps the dtypes its rules declare",
+        "src/synthweave/pipeline.py",
+        """        return pd.DataFrame(
+            {
+                name: as_declared(rules[name], empty) if name in rules else empty
+                for name in columns
+            },
+            columns=columns,
+        )""",
+        "        return pd.DataFrame(columns=columns)",
     ),
 ]
 

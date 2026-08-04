@@ -774,6 +774,50 @@ def test_a_table_that_emits_no_rows_still_has_its_columns():
     assert list(empty.columns) == list(non_empty.columns)
 
 
+def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
+    """A zero-row run must not change a table's types, only its length.
+
+    Whether a run produced rows is a property of the data, not of the schema,
+    so a caller writing the result to Parquet must get the same schema either
+    way. `pd.DataFrame(columns=...)` types every column `object`, which turns
+    a coverage gap into a schema change that a downstream reader sees as a
+    different table.
+
+    `score` is the load-bearing column: it is the only one whose declared type
+    (`int64`) differs from the `object` an empty frame defaults to, so a test
+    without it cannot tell the two apart.
+    """
+    person = sw.Entity(
+        "person",
+        count=5,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    columns = {"score": sw.Integer(0, 100), "weight": sw.Uniform(0.0, 1.0)}
+    empty_table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns=columns,
+        coverage=0.001,
+    )
+    non_empty_table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns=columns,
+    )
+    empty = sw.Pipeline(sw.Schema(entities=[person], tables=[empty_table], seed=4)).run()["t"]
+    non_empty = sw.Pipeline(
+        sw.Schema(entities=[person], tables=[non_empty_table], seed=4)
+    ).run()["t"]
+
+    assert len(empty) == 0 and len(non_empty) > 0
+    assert list(empty.dtypes.items()) == list(non_empty.dtypes.items())
+
+
 # --- edge cases that turned out to be sound ---------------------------------
 
 
