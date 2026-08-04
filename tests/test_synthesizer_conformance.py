@@ -87,7 +87,9 @@ def test_a_conforming_synthesizer_passes(careers):
 
 
 def test_a_row_dropping_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="rows"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*how many rows"
+    ):
         sw.check_synthesizer(RowDropper(), careers)
 
 
@@ -97,17 +99,21 @@ def test_a_synthesizer_dropping_the_row_key_is_rejected(careers):
     `KeyError: '_sw_row'` raised from inside the harness. A plugin author got
     the column name and nothing about which guarantee they had broken.
     """
-    with pytest.raises(sw.SynthesizerConformanceError, match="reserved row key"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*reserved row key"
+    ):
         sw.check_synthesizer(RowKeyDropper(), careers)
 
 
 def test_a_row_reordering_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="reordered the rows"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*reordered the rows"
+    ):
         sw.check_synthesizer(RowShuffler(), careers)
 
 
 def test_a_column_inventing_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="column"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^columns survive:"):
         sw.check_synthesizer(ColumnInventor(), careers)
 
 
@@ -123,7 +129,9 @@ class Meddler(KeyedSynth):
 
 
 def test_a_synthesizer_writing_an_undeclared_column_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="did not declare"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^undeclared columns untouched:"
+    ):
         sw.check_synthesizer(Meddler(), careers)
 
 
@@ -139,7 +147,7 @@ class RandomSynth(KeyedSynth):
 
 
 def test_a_non_deterministic_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="not deterministic"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^determinism:"):
         sw.check_synthesizer(RandomSynth(), careers)
 
 
@@ -156,7 +164,7 @@ class ChunkCounter(KeyedSynth):
 
 
 def test_a_chunk_size_dependent_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="chunk invariant"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^chunk invariance:"):
         sw.check_synthesizer(ChunkCounter(), careers)
 
 
@@ -177,7 +185,7 @@ class ShrinkingSynth(KeyedSynth):
 def test_a_synthesizer_whose_runs_disagree_in_shape_is_rejected(careers):
     """The shape mismatch is reported as the determinism failure it is,
     rather than surfacing as a length error from the value comparison."""
-    with pytest.raises(sw.SynthesizerConformanceError, match="not deterministic"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^determinism:"):
         sw.check_synthesizer(ShrinkingSynth(), careers)
 
 

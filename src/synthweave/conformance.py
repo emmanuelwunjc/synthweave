@@ -22,6 +22,13 @@ generator makes about the chunks it emits. It needs a whole `Schema` rather
 than a bare object, because a generator's output is a function of the config
 and nothing else; that is a real ergonomic difference from `check_rule`, and
 the reason it takes `schema` positionally.
+
+Every conformance failure raised here names its clause first, as
+`"<clause>: <detail>"`, via `_fail_synthesizer` or `_fail_generator`. The
+prefix is load-bearing rather than cosmetic: a conformance check can go red
+for a reason other than the one a test meant to provoke, and the prefix is
+what lets that test assert it went red for the guarantee it named instead of
+an incidental one. A third checker added here follows the same shape.
 """
 
 from __future__ import annotations
@@ -56,27 +63,28 @@ def check_synthesizer(
     Runs `synthesizer.run` over chunks a real generator emitted for one of
     `schema`'s tables, and checks, in order:
 
-    1. Rows survive. A synthesizer changes values; it never adds, drops or
+    1. `rows survive`. A synthesizer changes values; it never adds, drops or
        reorders rows. Checked on the reserved row key, so it sees a reorder
-       that a row count alone would miss.
-    2. Columns survive. Stage 2 fills columns the schema declared; it neither
-       invents one nor drops one.
-    3. Undeclared columns are untouched. Every column outside `columns` comes
+       that a row count alone would miss, and names the key if it is dropped.
+    2. `columns survive`. Stage 2 fills columns the schema declared; it
+       neither invents one nor drops one.
+    3. `undeclared columns untouched`. Every column outside `columns` comes
        back exactly as the generator emitted it.
-    4. Determinism. Running it twice over identical input gives identical
+    4. `determinism`. Running it twice over identical input gives identical
        output, so no hidden RNG state is involved.
-    5. Chunk invariance. Running it at `split_chunk_size` gives the same
+    5. `chunk invariance`. Running it at `split_chunk_size` gives the same
        output as at `chunk_size`. This is the guarantee that chunk size is a
        memory knob and nothing else, and the one a fit that buffers whole
        chunks breaks.
 
-    Checks 4 and 5 are only as strong as the configuration they run under: a
-    synthesizer whose fit cap sits above the whole fixture never exercises
-    its buffering, so check it configured the way it will really be used.
+    Raises `SynthesizerConformanceError` prefixed with the clause that broke
+    and showing the first differences, or returns `None` if the synthesizer
+    passes all five.
 
-    Raises `SynthesizerConformanceError` naming the guarantee that broke and
-    showing the first differences, or returns `None` if the synthesizer
-    passes.
+    Clauses 4 and 5 are only as strong as the configuration they run
+    under: a synthesizer whose fit cap sits above the whole fixture never
+    exercises its buffering, so check it configured the way it will really be
+    used.
 
     `table` names which of `schema`'s tables to run against, and may be
     omitted only when the schema has exactly one. `columns` names the columns
@@ -95,6 +103,7 @@ def check_synthesizer(
 
     repeat = _apply(synthesizer, source, target, schema, chunk_size)
     _check_same_frame(
+        "determinism",
         baseline,
         repeat,
         "running the synthesizer twice over identical input gave different values back "
@@ -104,6 +113,7 @@ def check_synthesizer(
 
     split = _apply(synthesizer, source, target, schema, split_chunk_size)
     _check_same_frame(
+        "chunk invariance",
         baseline,
         split,
         f"running the synthesizer at chunk_size={split_chunk_size} instead of "
@@ -116,12 +126,22 @@ def check_synthesizer(
 # --- individual checks ------------------------------------------------------
 
 
+def _fail_synthesizer(clause: str, detail: str) -> None:
+    """Raise naming the clause first, the way `_fail_generator` does.
+
+    Kept beside the checks it serves rather than at the bottom of the module,
+    because it is the first thing a new clause has to reach for.
+    """
+    raise SynthesizerConformanceError(f"{clause}: {detail}")
+
+
 def _check_rows_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
     if len(given) != len(got):
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "rows survive",
             f"the synthesizer changed how many rows there are: it was given {len(given)} "
             f"row(s) and returned {len(got)}. A synthesizer changes values in the rows it "
-            "is handed; adding or dropping rows is the generator's job, not stage 2's."
+            "is handed; adding or dropping rows is the generator's job, not stage 2's.",
         )
     if ROW_KEY not in got.columns:
         # Guarded rather than left to `got[ROW_KEY]`, which raises a bare
@@ -129,22 +149,24 @@ def _check_rows_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
         # an easy mistake (it reads as internal bookkeeping), and a function
         # whose whole job is to name the broken guarantee should not be the one
         # that fails to.
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "rows survive",
             f"the synthesizer dropped {ROW_KEY!r}, the reserved row key. It is not "
             "internal bookkeeping to strip: every downstream stage keys on it, and "
             "the pipeline cannot line the synthesized values back up without it. "
-            "Pass it through untouched."
+            "Pass it through untouched.",
         )
     before = given[ROW_KEY].tolist()
     after = got[ROW_KEY].tolist()
     if before != after:
         differing = [i for i, (b, a) in enumerate(zip(before, after)) if b != a]
         first = differing[0]
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "rows survive",
             f"the synthesizer reordered the rows it was given: {len(differing)} row(s) came "
             f"back under a different {ROW_KEY!r}, first at position {first} "
             f"(was {before[first]!r}, got {after[first]!r}). Row order is the generator's, "
-            "and downstream stages key on it."
+            "and downstream stages key on it.",
         )
 
 
@@ -161,10 +183,11 @@ def _check_columns_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
             )
             if part
         )
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "columns survive",
             f"the synthesizer changed which columns the table has: {detail}. Stage 2 fills "
             "columns the schema declared, so a column it adds reaches the user as one the "
-            "schema never promised, and one it drops is a column the schema did promise."
+            "schema never promised, and one it drops is a column the schema did promise.",
         )
 
 
@@ -182,27 +205,32 @@ def _check_undeclared_columns_untouched(
             continue
         rows = _differing_rows(given[column], got[column])
         if len(rows):
-            raise SynthesizerConformanceError(
+            _fail_synthesizer(
+                "undeclared columns untouched",
                 f"the synthesizer wrote to column {column!r}, which it did not declare "
                 f"(it declared {list(declared)}). {len(rows)} row(s) differ, "
-                f"e.g. {_show(given[column], got[column], rows)}."
+                f"e.g. {_show(given[column], got[column], rows)}.",
             )
 
 
-def _check_same_frame(expected: pd.DataFrame, actual: pd.DataFrame, reason: str) -> None:
+def _check_same_frame(
+    clause: str, expected: pd.DataFrame, actual: pd.DataFrame, reason: str
+) -> None:
     """Two runs of the same synthesizer must agree column for column."""
     if list(expected.columns) != list(actual.columns) or len(expected) != len(actual):
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            clause,
             f"{reason}. The two runs do not even have the same shape: "
             f"{expected.shape} with columns {list(expected.columns)} versus "
-            f"{actual.shape} with columns {list(actual.columns)}"
+            f"{actual.shape} with columns {list(actual.columns)}",
         )
     for column in expected.columns:
         rows = _differing_rows(expected[column], actual[column])
         if len(rows):
-            raise SynthesizerConformanceError(
+            _fail_synthesizer(
+                clause,
                 f"{reason}. Column {column!r} differs in {len(rows)} of {len(expected)} "
-                f"row(s), e.g. {_show(expected[column], actual[column], rows)}"
+                f"row(s), e.g. {_show(expected[column], actual[column], rows)}",
             )
 
 
