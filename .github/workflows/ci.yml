@@ -46,11 +46,17 @@ jobs:
   # pandas 2 suite fully green, so nothing but this job guards that fix.
   test-pandas3:
     runs-on: ubuntu-latest
+    # Same 10 minutes as `test`: this runs the same suite on one interpreter,
+    # with one extra pip install on top. Anything past that is a hang, and a
+    # hung required check blocks the whole `strict: true` merge queue until
+    # GitHub's six-hour default kills it.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: pip
       - run: pip install -e ".[dev]"
       - run: pip install "pandas>=3,<4"
       - run: PYTHONPATH=src python3 -m pytest tests/ -q

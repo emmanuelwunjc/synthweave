@@ -172,8 +172,17 @@ def _git(*args) -> str:
 
 
 def _default_range() -> str:
-    """Everything since the previous release tag, for the tag being built."""
-    current = _git("describe", "--tags", "--exact-match").strip()
+    """Everything since the previous release tag, for the tag being built.
+
+    `--match` is not decoration. `previous_tag` already filters non-release
+    tags out of the earlier side of the range; the current side needs the same
+    filter for the same reason. `git describe --exact-match` returns whichever
+    tag on the commit sorts first by refname, so a housekeeping tag like
+    `archive/bug-hunt` beats `v0.2.0` when both point at the release commit,
+    and `previous_tag` then raises. That step runs before the PyPI publish, so
+    a tag with nothing to do with releasing would block the release outright.
+    """
+    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()
     earlier = previous_tag(_git("tag", "--list").split(), current)
     return f"{earlier}..{current}" if earlier else current
 

@@ -79,6 +79,50 @@ def test_a_doc_only_named_in_prose_is_not_indexed():
     assert not check_docs_map.is_indexed(prose_only, "SECURITY.md")
 
 
+def test_a_doc_in_a_subdirectory_is_not_covered_by_its_namesake():
+    """Matching on the bare filename made any new `docs/<dir>/GUIDE.md` pass
+    on the strength of the existing `docs/GUIDE.md` row. The map indexes a
+    file, not a name, so the whole path has to appear.
+    """
+    map_text = "| the API | `docs/GUIDE.md` |\n"
+    assert check_docs_map.is_indexed(map_text, "docs/GUIDE.md")
+    assert not check_docs_map.is_indexed(map_text, "docs/tutorial/GUIDE.md")
+
+
+def test_a_longer_filename_does_not_index_the_shorter_one():
+    """A substring test let an entry for `MYGUIDE.md` mark `GUIDE.md` as
+    indexed. The reader following that entry lands on the wrong document.
+    """
+    map_text = "- **The other guide**: `docs/MYGUIDE.md`\n"
+    assert not check_docs_map.is_indexed(map_text, "docs/GUIDE.md")
+
+
+def test_an_entry_pointing_at_a_missing_file_is_reported(tmp_path):
+    """The check only ever ran forwards, from file to map, so an entry whose
+    target was deleted or misspelled stayed in the map indefinitely: it reads
+    as an index and leads nowhere.
+    """
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/GUIDE.md").write_text("# guide\n")
+    map_text = "| the API | `docs/GUIDE.md` |\n| gone | `docs/OLD.md` |\n"
+    missing = check_docs_map.missing_targets(
+        map_text, tmp_path, is_ignored=lambda path: False
+    )
+    assert missing == ["docs/OLD.md"]
+
+
+def test_a_gitignored_target_may_be_absent(tmp_path):
+    """Most of docs/ is gitignored maintainer notes, absent from a fresh
+    clone and from CI. The map indexes them on purpose and says so, so their
+    absence is expected rather than a broken entry.
+    """
+    (tmp_path / "docs").mkdir()
+    map_text = "| session state | `docs/HANDOFF.md` |\n"
+    assert check_docs_map.missing_targets(
+        map_text, tmp_path, is_ignored=lambda path: True
+    ) == []
+
+
 @pytest.mark.parametrize(
     "entry",
     [

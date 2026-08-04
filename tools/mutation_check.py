@@ -4,11 +4,17 @@ A fix with no test that catches its absence is not locked down. Each revert is
 applied to a throwaway copy of the checkout, the suite runs against that copy,
 and the harness reports whether the suite noticed.
 
-Two properties are load-bearing and neither is traded for speed:
+Three properties are load-bearing and none is traded for speed:
 
 - MISSED: a reverted fix that no test catches fails the run.
 - STALE: an entry whose file or snippet no longer matches verified nothing, so
   it fails the run too.
+- INCONCLUSIVE: a suite run that never finished verified nothing either, so it
+  is neither a pass nor a catch, and it fails the run as well.
+
+The last one is the direction this harness must never fail in. "I could not
+tell" resolving to "covered" is worse than a crash, because a crash gets
+noticed.
 
 Every mutation is independent, so they run concurrently, one sandbox per
 worker. Sandboxing is what makes that safe: the real working tree is never
@@ -29,6 +35,7 @@ import concurrent.futures
 import os
 import pathlib
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -37,12 +44,65 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Copied per worker: everything except the version-control metadata and caches.
-# `.git` is skipped because it dominates the copy cost and because in a linked
-# worktree it is a file pointing at another directory, which would not survive
-# the copy anyway. One consequence, checked and accepted: `test_docs_map_sync`
-# self-skips without a git checkout, so it runs against the real tree but not
-# inside a sandbox. It guards a docs index, not any entry in MUTATIONS.
+#
+# Skipping `.git` is a deliberate narrowing, not an oversight, and it is not
+# free: the suite the sandbox runs is smaller than the one CI's `test` job
+# gates on. The tests that go missing are named in SANDBOX_BLIND_SPOT below,
+# and `report_blind_spot()` measures the gap on every run so it cannot widen
+# in silence.
+#
+# Why not carry `.git`. In a linked worktree `.git` is a *file* pointing at
+# another directory, so a plain copy either fails or produces a repo that
+# resolves back into the real checkout: local and CI behaviour would then
+# differ, which is the opposite of what this harness is for. Resolving
+# `--git-common-dir` and copying it is possible but pays ~12 MB per worker on
+# a 41 MB tree, once per `os.cpu_count()`. And it would not buy honesty: the
+# `@needs_git` tests ask `git check-ignore` about the *tracked* tree, so a
+# copied index describing the original checkout would answer about files that
+# are not the ones under test. `git init` in the sandbox is worse still (see
+# issue #131): a repo with no commits makes `tracked_files()` empty, and
+# `test_the_committed_tree_passes_its_own_guard` would pass while checking
+# nothing, the exact "test that cannot fail" shape CLAUDE.md warns about.
 SANDBOX_SKIP = (".git", "__pycache__", ".pytest_cache")
+
+# Test modules that cannot run inside a sandbox, and why. Declared here rather
+# than described in prose so `report_blind_spot()` can check the claim against
+# what the sandbox actually skips: a module that goes blind without being
+# listed here fails the run.
+SANDBOX_BLIND_SPOT = {
+    "tests/test_leak_guard.py": (
+        "the public-repo leak guard asks `git check-ignore` about the tracked "
+        "tree; every @needs_git test self-skips without a checkout"
+    ),
+    "tests/test_docs_map_sync.py": (
+        "compares docs/MAP.md against git's tracked-file list, which a "
+        "checkout-less tree cannot produce"
+    ),
+    "tests/test_mutation_shards.py": (
+        "one test measures this very blind spot by diffing a sandbox against "
+        "a real checkout, and a sandbox has no checkout to diff against"
+    ),
+}
+
+# Wall-clock bound on one suite run. A run that hits it is inconclusive, never
+# a pass and never a catch.
+SUITE_TIMEOUT = 300
+
+# How a suite run ended. Three outcomes, not two: "ran and went red" and "never
+# finished" used to share one `False`, which made a timed-out run indexed as
+# proof that a revert was caught.
+PASSED, FAILED, DID_NOT_FINISH = "passed", "failed", "did not finish"
+
+# Verdicts. CAUGHT is the only one that counts as coverage; the rest fail the
+# run, each for its own reason.
+CAUGHT, MISSED, STALE, INCONCLUSIVE = "CAUGHT", "MISSED", "STALE", "INCONCLUSIVE"
+
+# Printed above the names when a verdict fails the run.
+FAILURE_HEADLINE = {
+    STALE: "mutation(s) no longer match the code and verified nothing:",
+    MISSED: "fix(es) with NO regression coverage:",
+    INCONCLUSIVE: "mutation(s) whose suite run never finished, so nothing was verified:",
+}
 
 # (issue, file, original_snippet, reverted_snippet)
 MUTATIONS = [
@@ -150,8 +210,11 @@ MUTATIONS = [
     (
         "I13 empty table keeps its declared columns",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame()",
+        # `_concat`'s stand-in frame moved out to `Pipeline._empty_frame` with
+        # the #82 dtype fix. Same fix, same revert: hand back a frame with no
+        # columns and see whether the suite notices.
+        "        return empty\n",
+        "        return pd.DataFrame()\n",
     ),
     (
         "I14 identifier width vs population",
@@ -441,8 +504,8 @@ MUTATIONS = [
     (
         "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
         "src/synthweave/mode.py",
-        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
-        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+        '            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)',
+        '            "synthesizer": _empirical_cart(list(self._variables), self._fetched)',
     ),
     (
         "#89.3 scope epsilon is validated, not clamped (mode level)",
@@ -470,6 +533,18 @@ MUTATIONS = [
                 f"attribute {name!r}: real_data mode takes only epsilon, got "
                 f"{sorted(kwargs)}; the column's distribution comes from the "
                 "donor frame, not from a declared rule"
+            )
+""",
+        "",
+    ),
+    (
+        "N2 a stray attribute kwarg in scope mode is named, not a bare TypeError",
+        "src/synthweave/mode.py",
+        """        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: scope mode takes only variable and "
+                f"epsilon, got {sorted(kwargs)}; the column's distribution "
+                "comes from the fetched ACS rows, not from a declared rule"
             )
 """,
         "",
@@ -693,10 +768,13 @@ MUTATIONS = [
         '    if getattr(chunk, "_is_view", False):',
     ),
     (
+        # Retargeted 2026-08-04: #82 moved the empty-table build into
+        # `_empty_frame`, so the old snippet stopped matching and the entry went
+        # STALE. Same guarantee, same test, new line.
         "#65 an empty table keeps its declared column order, not a sorted one",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame(columns=sorted(columns))",
+        "            columns=columns,\n        )",
+        "            columns=sorted(columns),\n        )",
     ),
     (
         "#142 check_synthesizer names the dropped row key instead of raising KeyError",
@@ -714,10 +792,190 @@ MUTATIONS = [
         'pii = ["Faker>=20,<41"]',
         'pii = ["Faker>=20,<42"]',
     ),
+    (
+        # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
+        # that an entity's rows never straddle a boundary, and until #53 nothing
+        # asserted it. This entry breaks the guarantee in the shipped generator
+        # (one row, then the rest, so a chunk boundary lands inside the first
+        # entity) while leaving determinism, chunk invariance, the emitted
+        # columns and the row count untouched. Only the non-straddling check can
+        # notice, which is the point of logging it here.
+        #
+        # The `len(chunk) > 1` guard is what keeps that true. Splitting
+        # unconditionally makes `chunk.iloc[1:]` empty for a one-row chunk,
+        # which is a *second* broken invariant (line 63 above refuses to emit an
+        # empty chunk) and one that crashes three tests in `test_pipeline.py`
+        # and `test_synthesis_and_plugins.py` on `ValueError: zero-size array to
+        # reduction operation maximum`. Those reds say nothing about
+        # straddling, and they are enough on their own to report this entry
+        # CAUGHT with the whole non-straddling clause deleted, which would make
+        # the entry worthless as evidence for the thing it names. That is the
+        # #19 trap: plausible, green, proving nothing.
+        "#53 generator chunks whole entities (non-straddling)",
+        "src/synthweave/stages/generate.py",
+        """            emitted += len(chunk)
+            yield chunk
+""",
+        """            emitted += len(chunk)
+            if len(chunk) > 1:
+                yield chunk.iloc[:1]
+                yield chunk.iloc[1:]
+            else:
+                yield chunk
+""",
+    ),
+    (
+        "#61 find_stack_level walks out of the package instead of guessing",
+        "src/synthweave/_deprecation.py",
+        """    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and _is_ours(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    return level""",
+        """    return 2""",
+    ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
+    (
+        "#82 an empty table keeps the dtypes its rules declare",
+        "src/synthweave/pipeline.py",
+        """        return pd.DataFrame(
+            {
+                name: as_declared(rules[name], empty) if name in rules else empty
+                for name in columns
+            },
+            columns=columns,
+        )""",
+        "        return pd.DataFrame(columns=columns)",
+    ),
+    # Reverting either of these puts the leak guard back exactly as PR #106
+    # merged it, which is the state where `aws_secret_access_key=...` and a
+    # real person in a tests/ fixture both pass clean. The failure they cause
+    # is invisible and permanent -- a credential in public git history, with
+    # pre-commit printing `Passed` -- so the tests that catch them are worth
+    # pinning here.
+    (
+        "#153 a bare KEY is a credential stem, so `census_key=` is a credential",
+        "tools/check_no_private_leak.py",
+        r'    r"(?:KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
+        r'    r"(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
+    ),
+    (
+        "#153 name parts after the stem, so `secret_key_base=` is a credential",
+        "tools/check_no_private_leak.py",
+        r'    r"(?:_[A-Z0-9]+)*\b"',
+        r'    r"\b"',
+    ),
+    (
+        "#153 a 12-character value with a digit is credential-shaped",
+        "tools/check_no_private_leak.py",
+        r"[A-Za-z0-9_\-]{12,}|",
+        r"[A-Za-z0-9_\-]{20,}|",
+    ),
+    (
+        "#154 src/, tests/ and examples/ are not exempt from the personal shapes",
+        "tools/check_no_private_leak.py",
+        "    patterns = _UNIVERSAL_PATTERNS + _PERSONAL_PATTERNS",
+        "    patterns = _UNIVERSAL_PATTERNS",
+    ),
+    (
+        "#139 later epsilon groups condition on the columns earlier ones produced",
+        "src/synthweave/mode.py",
+        "                    predictors=list(conditioned),\n",
+        "",
+    ),
+    (
+        "#144 a real column is scoped to the tables that declared it",
+        "src/synthweave/mode.py",
+        "                    tables=[table_name],\n",
+        "",
+    ),
+    (
+        "#144 a real attribute no table carries raises instead of reaching all of them",
+        "src/synthweave/mode.py",
+        """    unmatched = sorted(set(names) - matched)
+    if unmatched:
+        raise ValueError(""",
+        """    unmatched = []
+    if unmatched:
+        raise ValueError(""",
+    ),
+    (
+        "#144 a real attribute bound under another name raises, not an all-null column",
+        "src/synthweave/mode.py",
+        "        if isinstance(rule, _RealDataColumn) and rule.name != bound:",
+        "        if False:",
+    ),
+    (
+        "#145 each epsilon group records under its own provenance/report key",
+        "src/synthweave/stages/synthesize.py",
+        '        prefix = f"{table.name}.synth" + (f".{self.label}" if self.label else "")\n'
+        '        stage = "synthesize" + (f".{self.label}" if self.label else "")',
+        '        prefix = f"{table.name}.synth"\n'
+        '        stage = "synthesize"',
+    ),
+    (
+        "#145 an epsilon-derived leaf size is user-provided, not a library default",
+        "src/synthweave/mode.py",
+        """        "min_samples_leaf": user(
+            max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
+        ),""",
+        '        "min_samples_leaf": max(5, round(100 / capped)),',
+    ),
+    (
+        # The exact mutation #143 reported as invisible: epsilon becomes a total
+        # no-op. It used to fail four tests, every one of them asserting a knob
+        # value on the synthesizer object rather than anything in the output.
+        "#143 epsilon reaches the synthesized data, not only the knob values",
+        "src/synthweave/mode.py",
+        "    capped = min(max(epsilon, 0.01), 5.0)",
+        "    capped = 5.0",
+    ),
+    # A non-release tag sharing the release commit (this repo had
+    # `archive/bug-hunt`) makes `git describe --exact-match` return it, which
+    # `previous_tag` rejects. That step runs before the PyPI publish, so the
+    # whole release stops for a tag that has nothing to do with releasing.
+    (
+        "R1 release notes derive the current tag from v* tags only",
+        "tools/release_notes.py",
+        '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
+        '    current = _git("describe", "--tags", "--exact-match").strip()',
+    ),
 ]
 
 
-def run_suite(cwd: pathlib.Path) -> tuple[bool, str, str]:
+def run_suite(
+    cwd: pathlib.Path,
+    targets: tuple[str, ...] = ("tests/",),
+    extra: tuple[str, ...] = (),
+) -> tuple[str, str, str]:
+    """Run the suite in `cwd`. Returns (outcome, summary line, full output)."""
     # Inherit the real environment and override only PYTHONPATH. Replacing it
     # outright used to work on a dev machine and fail on a CI runner, where
     # the interpreter lives outside a hardcoded PATH and the suite needs
@@ -731,18 +989,96 @@ def run_suite(cwd: pathlib.Path) -> tuple[bool, str, str]:
     env = {**os.environ, "PYTHONPATH": "src"}
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/", "-q", "--no-header", "-x", "-W", "error::UserWarning"],
+            [sys.executable, "-m", "pytest", *targets, "-q", "--no-header", "-x",
+             "-W", "error::UserWarning", *extra],
             cwd=cwd,
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=SUITE_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
-        return False, "suite timed out after 300s", ""
+    except subprocess.TimeoutExpired as expired:
+        # Not FAILED. The suite never reached a verdict, so this run says
+        # nothing at all about the mutation it was checking.
+        return DID_NOT_FINISH, f"suite timed out after {expired.timeout}s", ""
     output = proc.stdout + proc.stderr
     tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
-    return proc.returncode == 0, (tail[-1] if tail else "no output"), output
+    outcome = PASSED if proc.returncode == 0 else FAILED
+    return outcome, (tail[-1] if tail else "no output"), output
+
+
+_SKIPPED_LINE = re.compile(r"^SKIPPED \[(\d+)\] ([^:\s]+):")
+
+
+def skips_by_module(output: str) -> dict[str, int]:
+    """Total the `-rs` short summary's skips per test module."""
+    counts: dict[str, int] = {}
+    for line in output.splitlines():
+        found = _SKIPPED_LINE.match(line.strip())
+        if found:
+            counts[found.group(2)] = counts.get(found.group(2), 0) + int(found.group(1))
+    return counts
+
+
+def blind_spot(sandbox_output: str, checkout_output: str) -> dict[str, int]:
+    """Tests the sandbox skips that a real checkout runs, per module.
+
+    A module that skips for the same reason in both trees (SSA_NAMES_ZIP being
+    unset, say) is not a blind spot; only the extra skips the sandbox itself
+    causes are.
+    """
+    checkout = skips_by_module(checkout_output)
+    extra = {}
+    for module, count in skips_by_module(sandbox_output).items():
+        lost = count - checkout.get(module, 0)
+        if lost > 0:
+            extra[module] = lost
+    return extra
+
+
+def undeclared_blind_spot(measured: dict[str, int]) -> dict[str, int]:
+    """The measured blind spot minus what SANDBOX_BLIND_SPOT admits to."""
+    return {m: n for m, n in measured.items() if m not in SANDBOX_BLIND_SPOT}
+
+
+def report_blind_spot(baseline_output: str) -> int:
+    """Print the sandbox-versus-checkout skip delta; 1 if it is wider than declared.
+
+    The baseline run's own `-rs` summary names every module that skipped in the
+    sandbox. Only those modules are re-run against the real checkout, so the
+    measurement costs one short pytest run rather than a second full suite.
+    """
+    suspects = sorted(skips_by_module(baseline_output))
+    if not suspects:
+        print("sandbox skew: nothing skipped in the sandbox")
+        return 0
+
+    outcome, msg, checkout_output = run_suite(
+        ROOT, tuple(suspects), ("-rs", "-p", "no:cacheprovider")
+    )
+    if outcome != PASSED:
+        # Not fatal here: the `test` job gates the real tree. Say so rather
+        # than print a delta measured against a run that did not complete.
+        print(f"sandbox skew: not measured, the checkout probe run {outcome} ({msg})")
+        return 0
+
+    measured = blind_spot(baseline_output, checkout_output)
+    if not measured:
+        print("sandbox skew: none, the sandbox runs every test the checkout does")
+        return 0
+
+    total = sum(measured.values())
+    detail = ", ".join(f"{module} ({count})" for module, count in sorted(measured.items()))
+    print(f"sandbox skew: {total} test(s) skip in the sandbox but run in the checkout: {detail}")
+
+    undeclared = undeclared_blind_spot(measured)
+    if undeclared:
+        print("\nthese modules go blind in the sandbox and are not declared in SANDBOX_BLIND_SPOT:")
+        for module, count in sorted(undeclared.items()):
+            print(f"  - {module} ({count} test(s))")
+        print("  declare them with a reason, or make the sandbox carry what they need")
+        return 1
+    return 0
 
 
 def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
@@ -754,24 +1090,28 @@ def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path
         # nothing. It used to crash the whole run instead, which meant one
         # entry naming a file absent on the current branch took down every
         # later entry's check too.
-        return "STALE", name, f"{relpath} does not exist, so nothing was verified"
+        return STALE, name, f"{relpath} does not exist, so nothing was verified"
     text = source.read_text()
     if original not in text:
-        return "STALE", name, "snippet not found, so nothing was verified"
+        return STALE, name, "snippet not found, so nothing was verified"
 
     sandbox = sandboxes.get()
     try:
         path = sandbox / relpath
         path.write_text(text.replace(original, reverted, 1))
         try:
-            ok, msg, _ = run_suite(sandbox)
+            outcome, msg, _ = run_suite(sandbox)
         finally:
             # The sandbox is reused by the next entry, so put the file back
             # even though nothing outside this directory can see it.
             path.write_text(text)
     finally:
         sandboxes.put(sandbox)
-    return ("CAUGHT" if not ok else "MISSED"), name, msg
+    # Anything that is not a completed pass or a completed failure is
+    # inconclusive. The mapping is deliberately explicit rather than a
+    # `not ok`: only a suite that ran to a red verdict earns CAUGHT.
+    verdict = {FAILED: CAUGHT, PASSED: MISSED}.get(outcome, INCONCLUSIVE)
+    return verdict, name, msg
 
 
 def shard(entries: list, spec: str | None) -> list:
@@ -820,10 +1160,10 @@ def main(argv: list[str]) -> int:
 
         print(f"baseline ({workers} workers): ", end="", flush=True)
         first = sandboxes.get()
-        ok, msg, output = run_suite(first)
+        outcome, msg, output = run_suite(first, extra=("-rs",))
         sandboxes.put(first)
-        print(f"{'PASS' if ok else 'FAIL'}  {msg}")
-        if not ok:
+        print(f"{'PASS' if outcome == PASSED else 'FAIL'}  {msg}")
+        if outcome != PASSED:
             # The whole run stops here, so print what actually failed.
             # Reporting only "baseline must pass" leaves no way to diagnose it
             # from a CI log, where nobody can re-run the suite by hand.
@@ -832,33 +1172,38 @@ def main(argv: list[str]) -> int:
             print("baseline must pass before mutating")
             return 1
 
-        gaps = []
-        stale = []
+        # The baseline PASS above is earned over the sandbox's suite, which is
+        # not quite the checkout's. Say by how much, and refuse to run if the
+        # difference is wider than SANDBOX_BLIND_SPOT admits.
+        if report_blind_spot(output):
+            return 1
+
+        failures: dict[str, list[str]] = {verdict: [] for verdict in FAILURE_HEADLINE}
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             # `map` yields in submission order, so the log reads the same way
             # it did when this ran one entry at a time.
             for verdict, name, detail in pool.map(lambda e: check(e, sandboxes), entries):
-                if verdict == "STALE":
+                if verdict == STALE:
                     print(f"  STALE  {name}: {detail}")
-                    stale.append(name)
-                    continue
-                print(f"  {verdict:<7} {name}\n           -> {detail}")
-                if verdict == "MISSED":
-                    gaps.append(name)
+                else:
+                    print(f"  {verdict:<12} {name}\n                -> {detail}")
+                if verdict in failures:
+                    failures[verdict].append(name)
 
     print()
-    if stale:
-        print(f"{len(stale)} mutation(s) no longer match the code and verified nothing:")
-        for s in stale:
-            print(f"  - {s}")
-        print("  fix the snippet; a stale mutation reads as a pass and is not one")
-    if gaps:
-        print(f"{len(gaps)} fix(es) with NO regression coverage:")
-        for g in gaps:
-            print(f"  - {g}")
-    if not gaps and not stale:
+    for verdict, names in failures.items():
+        if not names:
+            continue
+        print(f"{len(names)} {FAILURE_HEADLINE[verdict]}")
+        for name in names:
+            print(f"  - {name}")
+        if verdict == STALE:
+            print("  fix the snippet; a stale mutation reads as a pass and is not one")
+        if verdict == INCONCLUSIVE:
+            print("  re-run these; an unfinished run is not evidence of anything")
+    if not any(failures.values()):
         print("every logged fix is covered by a failing test")
-    return 1 if (gaps or stale) else 0
+    return 1 if any(failures.values()) else 0
 
 
 if __name__ == "__main__":
