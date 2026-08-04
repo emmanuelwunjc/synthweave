@@ -87,7 +87,33 @@ def check_synthesizer(
     and showing the first differences, or returns `None` if the synthesizer
     passes all five.
 
-    Clauses 4 and 5 are only as strong as the configuration they run
+    What a pass does NOT mean. It is a statement about those five properties
+    and nothing else. It is not a correctness certificate, and it is
+    emphatically not a privacy or disclosure one. Each of the following
+    passes today:
+
+    - A synthesizer that declares a column and never writes to it. Nothing
+      here requires a declared column to be filled, so "declared `wage` and
+      left it as the generator drew it" conforms.
+    - A synthesizer that copies source values through verbatim. That is the
+      disclosure a synthesizer exists to prevent, and it is certified: the
+      clauses ask whether the values are stable, never whether they are new.
+    - A synthesizer keyed on a row's position in the stream rather than on
+      the reserved row key. `check_rule` rejects that by name ("position or
+      order"); there is no equivalent clause here, and its absence is a known
+      gap rather than a decision that it is safe. It survives clauses 4 and 5
+      because the built-in generator's row order is position stable, so a
+      position-keyed synthesizer gives the same answer twice and at both
+      chunk sizes.
+    - A synthesizer that reorders columns. Clause 2 compares set membership,
+      and column order is what a CSV export writes.
+    - A synthesizer that mutates the caller's chunk in place instead of
+      copying it.
+    - Anything about a generator other than the one named by `generator=`,
+      which defaults to `"rules"`. The candidate is exercised against that
+      generator's chunks whatever the caller's real pipeline uses.
+
+    Clauses 4 and 5 are also only as strong as the configuration they run
     under: a synthesizer whose fit cap sits above the whole fixture never
     exercises its buffering, so check it configured the way it will really be
     used. Clause 5 needs a chunk boundary to mean anything at all, so a
