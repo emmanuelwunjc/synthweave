@@ -151,7 +151,11 @@ def _fake_pytest(monkeypatch, outcomes):
         outcome = remaining.pop(0) if remaining else 0
         if outcome == "timeout":
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=300)
-        summary = "1 passed in 0.01s\n" if outcome == 0 else "1 failed in 0.01s\n"
+        # An (exit code, summary line) pair where the summary matters.
+        if isinstance(outcome, tuple):
+            outcome, summary = outcome
+        else:
+            summary = "1 passed in 0.01s\n" if outcome == 0 else "1 failed in 0.01s\n"
         return completed(cmd, outcome, summary, "")
 
     monkeypatch.setattr(mutation_check.subprocess, "run", fake_run)
@@ -194,6 +198,136 @@ def test_a_suite_that_did_finish_still_decides_caught_versus_missed(monkeypatch,
     assert mutation_check.check(PROBE, _sandbox_for_probe(tmp_path))[0] == "CAUGHT"
     _fake_pytest(monkeypatch, [0])
     assert mutation_check.check(PROBE, _sandbox_for_probe(tmp_path))[0] == "MISSED"
+
+
+# --- #158 a catch has to be a catch *of the named property* ----------------
+#
+# Until now a mutation counted as CAUGHT whenever the suite went red, for any
+# reason at all. Two entries on main were pinned by reds that said nothing
+# about the property they name: one survived on whether a particular integer
+# was divisible by 199, another on a crash in three unrelated tests that
+# stayed red with the whole guarded clause deleted. Red-for-any-reason is the
+# same failure shape as the ones already fixed here: silence reading as a pass.
+#
+# The mechanism is a fifth tuple element naming the test(s) that must be among
+# the failures. These tests pin its three edges: a named catcher that passes,
+# a named catcher that fails, and a named catcher that no longer exists.
+
+PINNED = PROBE + (("tests/test_probe.py::test_probe",),)
+
+
+def test_an_entry_may_name_the_tests_that_must_catch_it():
+    """Four-element entries stay legal; a fifth element names the catchers."""
+    assert mutation_check.catchers(PROBE) == ()
+    assert mutation_check.catchers(PINNED) == ("tests/test_probe.py::test_probe",)
+
+
+def test_a_red_suite_whose_named_catcher_passed_is_not_reported_as_coverage(monkeypatch, tmp_path):
+    """The #158 property. The suite went red, but the test that owns the
+    property did not, so the red is incidental and proves nothing."""
+    # Full suite red, then the targeted catcher run green.
+    _fake_pytest(monkeypatch, [1, 0])
+    verdict, _, detail = mutation_check.check(PINNED, _sandbox_for_probe(tmp_path))
+    assert verdict != mutation_check.CAUGHT, (
+        "a red that no named catcher accounted for was reported as coverage"
+    )
+    assert verdict == mutation_check.INCIDENTAL
+    assert "test_probe" in detail
+
+
+def test_a_red_suite_whose_named_catcher_failed_is_caught(monkeypatch, tmp_path):
+    _fake_pytest(monkeypatch, [1, 1])
+    assert mutation_check.check(PINNED, _sandbox_for_probe(tmp_path))[0] == mutation_check.CAUGHT
+
+
+def test_a_named_catcher_that_only_skipped_is_inconclusive_not_incidental(monkeypatch, tmp_path):
+    """A pinned test can self-skip: `test_own_makes_a_view_safe_to_write_to`
+    does exactly that under pandas 3, and `test-pandas3` is a required check.
+    pytest exits 0 for an all-skipped selection, which would read as "the
+    catcher passed", i.e. as INCIDENTAL. Nothing ran, so nothing was verified,
+    and that is INCONCLUSIVE."""
+    _fake_pytest(monkeypatch, [1, (0, "1 skipped in 0.01s\n")])
+    verdict, _, detail = mutation_check.check(PINNED, _sandbox_for_probe(tmp_path))
+    assert verdict == mutation_check.INCONCLUSIVE, f"got {verdict}: {detail}"
+
+
+def test_a_named_catcher_that_no_longer_exists_is_stale_not_caught(monkeypatch, tmp_path):
+    """pytest answers a renamed or deleted nodeid with exit 4, which the old
+    `returncode != 0` read as a failing test, i.e. as a catch. A pin that
+    points at nothing verified nothing, which is exactly STALE."""
+    _fake_pytest(monkeypatch, [1, 4])
+    verdict, _, detail = mutation_check.check(PINNED, _sandbox_for_probe(tmp_path))
+    assert verdict == mutation_check.STALE, f"got {verdict}: {detail}"
+    assert "test_probe" in detail
+
+
+def test_an_unpinned_entry_keeps_the_old_behaviour(monkeypatch, tmp_path):
+    """The 90-odd entries with no fifth element must not change meaning, and
+    must not spend a second pytest run."""
+    _fake_pytest(monkeypatch, [1])
+    assert mutation_check.check(PROBE, _sandbox_for_probe(tmp_path))[0] == mutation_check.CAUGHT
+    _fake_pytest(monkeypatch, [0])
+    assert mutation_check.check(PROBE, _sandbox_for_probe(tmp_path))[0] == mutation_check.MISSED
+
+
+def test_an_incidental_catch_exits_non_zero(monkeypatch, tmp_path, capsys):
+    """A named verdict that still exits 0 leaves CI green over an entry that
+    verified nothing, the same hole #130 closed for timeouts."""
+    _fake_pytest(monkeypatch, [0, 1, 0])  # baseline, mutated suite red, catcher green
+    monkeypatch.setattr(mutation_check, "MUTATIONS", [PINNED])
+    monkeypatch.setattr(mutation_check, "report_blind_spot", lambda output: 0)
+    monkeypatch.setattr(
+        mutation_check.shutil,
+        "copytree",
+        lambda src, dst, **kw: (pathlib.Path(dst) / "tools").mkdir(parents=True) or dst,
+    )
+
+    status = mutation_check.main([])
+
+    out = capsys.readouterr().out
+    assert mutation_check.INCIDENTAL in out, out
+    assert status != 0, f"an incidental catch exited {status}:\n{out}"
+
+
+def test_a_pytest_usage_error_on_the_full_suite_is_not_a_catch(monkeypatch, tmp_path):
+    """Same guard one level up: exit 4 on `pytest tests/` means no test ran,
+    which is not evidence that the revert was noticed."""
+    _fake_pytest(monkeypatch, [4])
+    assert mutation_check.check(PROBE, _sandbox_for_probe(tmp_path))[0] != mutation_check.CAUGHT
+
+
+def test_every_declared_catcher_names_a_test_that_exists():
+    """The rename hazard, caught here in a one-second collection rather than
+    only in a 100-entry harness run: a pinned nodeid that no longer resolves
+    is a pin that verifies nothing."""
+    declared = sorted(
+        {nodeid for entry in mutation_check.MUTATIONS for nodeid in mutation_check.catchers(entry)}
+    )
+    if not declared:
+        pytest.skip("no entry pins a catcher yet")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header",
+         "-p", "no:cacheprovider", *declared],
+        cwd=ROOT, env={**os.environ, "PYTHONPATH": "src"}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        "at least one pinned catcher no longer resolves to a test:\n"
+        + proc.stdout + proc.stderr
+    )
+
+
+def test_failing_tests_reads_the_node_ids_out_of_a_short_summary():
+    """`--audit` reports which tests a mutation actually broke, so an
+    incidental red can be seen rather than inferred."""
+    output = (
+        "FAILED tests/test_pipeline.py::test_a - ValueError: zero-size array\n"
+        "FAILED tests/test_noise.py::test_b[Int64]\n"
+        "2 failed, 507 passed in 14.02s\n"
+    )
+    assert mutation_check.failing_tests(output) == [
+        "tests/test_noise.py::test_b[Int64]",
+        "tests/test_pipeline.py::test_a",
+    ]
 
 
 # --- #131 the sandbox's blind spot is declared, and no wider ---------------
