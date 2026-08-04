@@ -140,7 +140,10 @@ found in that source.
 
 **Noise op** — one specific kind of messiness applied to one column:
   - **Missing** — blank the value out entirely.
-  - **Typo** — swap one character for a nearby key on a keyboard.
+  - **Typo** — mistype one character: swap it for a nearby key on a Latin
+    keyboard, or, where the keyboard map does not know the character,
+    transpose it with its neighbour (or double it, when a transposition
+    would change nothing).
   - **OCR** — swap one character for one that looks similar on a scanned
     form (0 and O, 1 and I, and so on).
 
@@ -418,7 +421,15 @@ That is checked, not merely asked for: every chunk is also passed to the
 function split in two, and a rate that moves when the split moves raises,
 naming the column, the op, and the first row whose rate changed.
 
-- `sw.Typo(rate)` — one nearby-key typo in `rate` share of values.
+- `sw.Typo(rate)` — one mistyped character in `rate` share of values. Where
+  the character has a neighbour on a Latin keyboard, it is swapped for that
+  neighbour. Where it does not — a value written in a script the keyboard
+  map does not cover, e.g. `Ωμέγα` or `北京市` — the slip is a transposition
+  with the character next to it instead, or, when a transposition would
+  change nothing (a one-character value, or two identical characters side by
+  side), the character is duplicated. Duplication makes the value one
+  character longer; substitution and transposition keep its length. Empty
+  and null values pass through untouched.
 - `sw.OCR(rate)` — one visually-confusable-character swap in `rate` share of values.
 
 ### `sw.modeled(value, note)`, `sw.cited(value, source)`, `sw.user(value, note=None)`
