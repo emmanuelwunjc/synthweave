@@ -751,6 +751,33 @@ MUTATIONS = [
     return level""",
         """    return 2""",
     ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
 ]
 
 
