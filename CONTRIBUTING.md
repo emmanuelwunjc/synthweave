@@ -75,7 +75,8 @@ trusting it. A test that cannot fail is not coverage.
   Short-lived: hours or days, not weeks.
 - [Conventional Commits](https://www.conventionalcommits.org/) for subjects:
   `type(scope): description`, where type is `feat`, `fix`, `chore`, `docs`,
-  `refactor`, `test`, or `perf`. The body explains *why*, not *what*.
+  `refactor`, `test`, `perf`, `ci`, or `build`. The body explains *why*, not
+  *what*.
 - One logical change per commit and per PR. Keep PRs to a few hundred lines
   across a handful of files. Pushing back on an oversized PR is correct.
 - PRs squash-merge, so the PR title becomes the commit on `main` and appears
