@@ -49,8 +49,18 @@ class Mode:
         and no privacy accounting exist in this codebase. It is a convenience
         knob mapped onto `CARTSynthesizer`'s existing, already-correct
         generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
-        which is real and effective but not a formal privacy guarantee. See
-        `_cart_knobs` for the mapping.
+        which is real and effective for any column the synthesizer conditions
+        on, and is not a formal privacy guarantee. See `_cart_knobs` for the
+        mapping.
+
+        It is not effective for a column with nothing to condition on, which
+        is every column of a single-attribute schema: there the output is a
+        resample of verbatim donor records, and the only knob that bites is
+        `fit_cap`, which decides how many distinct real people get republished
+        rather than how much they are generalized. Lowering epsilon narrows
+        that set and repeats each of them more often. What epsilon should mean
+        instead is open in #163; the paragraph above describes what it does
+        today and settles nothing.
 
         Giving two attributes different epsilons does not decorrelate them.
         Each epsilon group is fit as its own tree, but every group after the
@@ -76,9 +86,21 @@ class Mode:
         and no privacy accounting exist in this codebase. It is a convenience
         knob mapped onto `CARTSynthesizer`'s existing, already-correct
         generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
-        which is real and effective but not a formal privacy guarantee. See
-        `_cart_knobs` for the mapping. It applies here for the same reason it
-        applies in `real_data` mode, and more so: the donor rows are real
+        which is real and effective for any column the synthesizer conditions
+        on, and is not a formal privacy guarantee. See `_cart_knobs` for the
+        mapping.
+
+        It is not effective for a column with nothing to condition on, which
+        is every column of a single-attribute schema: there the output is a
+        resample of verbatim donor records, and the only knob that bites is
+        `fit_cap`, which decides how many distinct real people get republished
+        rather than how much they are generalized. Lowering epsilon narrows
+        that set and repeats each of them more often. What epsilon should mean
+        instead is open in #163; the paragraph above describes what it does
+        today and settles nothing.
+
+        Epsilon applies here for the same reason it applies in `real_data`
+        mode, and more so: the donor rows are real
         Census respondent records, so leaving the synthesizer at its
         unbounded defaults would disclose more than the mode a user feeds
         their own data to. `attribute(name, variable=..., epsilon=...)`
@@ -526,6 +548,23 @@ def _cart_knobs(epsilon: float) -> dict[str, Any]:
     library default of five. The `max(5, ...)` floor below is a guard against
     a leaf smaller than that library default; it never binds while the clamp
     ceiling is 5, since `100 / 5` is already 20.
+
+    Two limits, stated because they are measured facts about this mapping and
+    not what a reader assumes from it. What to do about either is open in #163
+    and is a maintainer call, so nothing here resolves them:
+
+    - `max_depth` and `min_samples_leaf` only reach a column that has something
+      to condition on. `_FittedCART` builds no tree for a column with no
+      predictors and no earlier column, so the first column of the first
+      epsilon group is a plain resample of the donor's own values and neither
+      knob touches it. With one attribute that is the whole output: epsilon
+      0.01 and epsilon 5.0 give byte-identical frames.
+    - `fit_cap` is the one knob that does bite there, and what it controls is
+      how many real records sit in the resample pool. Lowering epsilon
+      therefore republishes *fewer* distinct real people, each of them more
+      often (995 distinct at 0.01 vs 4788 at 5.0, on a 50k-row donor and 5k
+      output rows). That is the opposite direction from the one a knob
+      presented as a privacy dial implies.
     """
     capped = min(max(epsilon, 0.01), 5.0)
     # Tagged as user-provided, not left a plain int. `CARTSynthesizer` reads a

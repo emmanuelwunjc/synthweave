@@ -752,6 +752,15 @@ MUTATIONS = [
         ),""",
         '        "min_samples_leaf": max(5, round(100 / capped)),',
     ),
+    (
+        # The exact mutation #143 reported as invisible: epsilon becomes a total
+        # no-op. It used to fail four tests, every one of them asserting a knob
+        # value on the synthesizer object rather than anything in the output.
+        "#143 epsilon reaches the synthesized data, not only the knob values",
+        "src/synthweave/mode.py",
+        "    capped = min(max(epsilon, 0.01), 5.0)",
+        "    capped = 5.0",
+    ),
 ]
 
 

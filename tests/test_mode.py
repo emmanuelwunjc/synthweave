@@ -423,7 +423,15 @@ def test_a_shared_acs_variable_is_requested_once():
     assert requested.count("PINCP") == 1
 
 
-def test_scope_generalizes_the_fetched_rows_by_epsilon():
+def test_scope_epsilon_sets_the_synthesizers_max_depth_knob():
+    """Named for the knob, because the knob is all it checks.
+
+    It was called `test_scope_generalizes_the_fetched_rows_by_epsilon`, and in
+    this exact scenario -- one attribute, so one column with nothing to
+    condition on -- `max_depth` changes nothing about the rows that come out
+    (#143, decision in #163). The data-level counterpart is
+    `test_epsilon_changes_the_synthesized_data_not_only_the_knob_values`.
+    """
     m = sw.Mode.scope(area_code="NY", epsilon=0.5)
     m.attribute("wage", variable="PINCP")
 
@@ -706,3 +714,62 @@ def test_an_epsilon_derived_leaf_size_is_not_reported_as_a_library_default(donor
     result = _two_epsilon_result(donor_frame)
 
     assert not [path for path in result.unjustified() if "min_samples_leaf" in path]
+
+
+# --- sw.Mode.real_data(): epsilon reaches the data, not just the knobs ----
+
+
+@pytest.fixture
+def stepped_donor() -> pd.DataFrame:
+    """Four regions whose wages are 20k apart, plus noise.
+
+    A conditioned column drawn under a tight epsilon cannot keep the steps: the
+    leaf size epsilon 0.01 asks for is larger than the whole fit sample, so the
+    tree has one leaf and wage stops depending on region. Under a loose epsilon
+    it splits per region and the steps survive. That difference is visible in
+    the output frame, which is the point of this fixture.
+    """
+    rng = np.random.default_rng(4)
+    region = rng.choice(["r0", "r1", "r2", "r3"], size=2_000)
+    frame = pd.DataFrame({"region": region})
+    steps = {"r0": 20_000.0, "r1": 40_000.0, "r2": 60_000.0, "r3": 80_000.0}
+    frame["wage"] = frame["region"].map(steps) + rng.normal(0, 1_000, 2_000)
+    return frame
+
+
+def _wage_spread_by_region(frame: pd.DataFrame) -> float:
+    means = frame.groupby("region")["wage"].mean()
+    return float(means.max() - means.min())
+
+
+def test_epsilon_changes_the_synthesized_data_not_only_the_knob_values(stepped_donor):
+    """#143: nothing in the suite checked that epsilon reaches the output.
+
+    Stubbing `_cart_knobs` to constants used to fail exactly four tests, and
+    every one of them asserted `synthesizer.max_depth` or the knob dict. This
+    one asserts the frame: a tight epsilon flattens the wage-by-region steps a
+    loose one keeps.
+    """
+
+    def run(epsilon: float) -> pd.DataFrame:
+        m = sw.Mode.real_data(source=stepped_donor, epsilon=epsilon)
+        region = m.attribute("region")
+        wage = m.attribute("wage")
+        person = m.entity(
+            "person", count=2_000, attributes={"region": region, "wage": wage}
+        )
+        table = m.table("roster", grain="person", carry=["region", "wage"])
+        return m.schema(entities=[person], tables=[table], seed=19).run()["roster"]
+
+    donor_spread = _wage_spread_by_region(stepped_donor)
+    loose = _wage_spread_by_region(run(5.0))
+    tight = _wage_spread_by_region(run(0.01))
+
+    assert loose > 0.9 * donor_spread, (
+        f"epsilon 5.0 should keep the donor's wage-by-region steps: "
+        f"spread {loose:.0f} vs donor {donor_spread:.0f}"
+    )
+    assert tight < 0.2 * donor_spread, (
+        f"epsilon 0.01 should generalize the steps away: "
+        f"spread {tight:.0f} vs donor {donor_spread:.0f}"
+    )
