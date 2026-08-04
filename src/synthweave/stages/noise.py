@@ -94,7 +94,32 @@ class Missing(NoiseOp):
 
 
 class Typo(NoiseOp):
-    """Replaces one character with a keyboard neighbour."""
+    """Mistypes one character: a keyboard slip, or a slip of the fingers.
+
+    A keyboard slip needs a layout, and `_KEYBOARD` only knows a Latin one.
+    The character picked for corruption used to be looked up there and the
+    row left untouched when it had no neighbour, which for a value written
+    entirely in a script the map does not cover (CJK, Greek, Cyrillic) is not
+    a reduced rate but zero corruption, on every row of every run, while the
+    reported realized rate still claimed the configured one. The declared
+    rate is a promise, so silently under-delivering it is worse than the
+    missing map.
+
+    Filling the map in for every script is the wrong repair twice over: it is
+    unbounded, and key adjacency is not how those scripts are typed in the
+    first place (a CJK value is composed through an IME, not struck key by
+    key). What is script-agnostic is the *other* everyday typo, the fingers
+    arriving out of order or twice:
+
+    - transposition, swapping the picked character with its neighbour;
+    - duplication, when transposition would not change anything (a
+      one-character value, or two identical characters side by side).
+
+    A keyboard slip is still preferred wherever the layout knows the
+    character, so Latin-script corruption is byte-for-byte what it was.
+    Empty and null values are still passed through: there is no character to
+    mistype, and `Missing` already owns the null case.
+    """
 
     def corrupt(self, values, keys, seed, salt):
         pos = _hash.unit(keys, seed, f"{salt}\x00pos")
@@ -107,12 +132,28 @@ class Typo(NoiseOp):
             j = min(int(pos[i] * len(text)), len(text) - 1)
             ch = text[j]
             options = _KEYBOARD.get(ch.lower())
-            if not options:
-                out[i] = text
-                continue
-            repl = options[j % len(options)]
-            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
         return out
+
+
+def _slip(text: str, j: int) -> str:
+    """Mistype character `j` without knowing what script it is written in.
+
+    Swap it with the character next to it, preferring the one on the right so
+    a mid-word slip reads the way a real one does. Two identical characters
+    swap to themselves and a one-character value has nothing to swap with, so
+    those double the character instead: a repeat is as ordinary a typo as a
+    transposition, and it is the only other corruption that needs no map.
+    """
+    for k in (j + 1, j - 1):
+        if 0 <= k < len(text) and text[k] != text[j]:
+            lo, hi = min(j, k), max(j, k)
+            return text[:lo] + text[hi] + text[lo] + text[hi + 1 :]
+    return text[:j] + text[j] + text[j:]
 
 
 class OCR(NoiseOp):
@@ -177,12 +218,33 @@ def _restore_dtype(values: np.ndarray, dtype: Any) -> np.ndarray | pd.api.extens
     numeric type. `Typo`/`OCR` replace a value with different text, which is
     a real type change, not noise to paper over; the cast below fails for
     that case and the column is left as object, as it must be.
+
+    `ndarray.astype` speaks numpy dtypes only, so a pandas ExtensionDtype
+    (`category`, nullable `Int64`, and every text column under pandas 3)
+    raises there rather than converting, and the column fell back to object
+    even when the values allowed the dtype: a `category` column that a
+    `Missing` pass had emptied came back as `object`, contradicting the
+    promise above. Those go through `pd.array`, the same restore
+    `CARTSynthesizer._restore` uses, rather than a second special case per
+    dtype the way `Int64` alone once was.
+
+    One difference from `astype` has to be undone here, though. Where
+    `astype` rejects a value the dtype cannot hold, `pd.array` maps it to
+    null: a `Typo` result outside a category's set would disappear into a
+    null and the column would read as clean. That is exactly the papering
+    over this function refuses to do, so a cast that nulls a value that was
+    not already null is treated as the failure `astype` would have raised.
     """
     if dtype == object:
         return values
     try:
         if any(v is None for v in values) and pd.api.types.is_integer_dtype(dtype):
             return pd.array(values, dtype="Int64")
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
         return values.astype(dtype)
     except (TypeError, ValueError):
         return values

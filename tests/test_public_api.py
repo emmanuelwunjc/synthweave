@@ -47,6 +47,7 @@ EXPECTED = (
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
     # conformance
+    "check_generator", "GeneratorConformanceError",
     "check_synthesizer", "SynthesizerConformanceError",
     # mode
     "Mode", "ModeSchema",
@@ -63,6 +64,8 @@ EXPECTED = (
     # extension
     "register", "unregister", "resolve", "available", "derive_id",
     "SchemaError",
+    # deprecation
+    "SynthweaveDeprecationWarning",
 )
 
 # Bound as a side effect of `from .schema import ...` and friends. Asserted

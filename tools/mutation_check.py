@@ -150,8 +150,11 @@ MUTATIONS = [
     (
         "I13 empty table keeps its declared columns",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame()",
+        # `_concat`'s stand-in frame moved out to `Pipeline._empty_frame` with
+        # the #82 dtype fix. Same fix, same revert: hand back a frame with no
+        # columns and see whether the suite notices.
+        "        return empty\n",
+        "        return pd.DataFrame()\n",
     ),
     (
         "I14 identifier width vs population",
@@ -693,10 +696,13 @@ MUTATIONS = [
         '    if getattr(chunk, "_is_view", False):',
     ),
     (
+        # Retargeted 2026-08-04: #82 moved the empty-table build into
+        # `_empty_frame`, so the old snippet stopped matching and the entry went
+        # STALE. Same guarantee, same test, new line.
         "#65 an empty table keeps its declared column order, not a sorted one",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame(columns=sorted(columns))",
+        "            columns=columns,\n        )",
+        "            columns=sorted(columns),\n        )",
     ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
@@ -707,6 +713,88 @@ MUTATIONS = [
         "pyproject.toml",
         'pii = ["Faker>=20,<41"]',
         'pii = ["Faker>=20,<42"]',
+    ),
+    (
+        # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
+        # that an entity's rows never straddle a boundary, and until #53 nothing
+        # asserted it. This entry breaks the guarantee in the shipped generator
+        # (one row, then the rest, so a chunk boundary lands inside the first
+        # entity) while leaving determinism, chunk invariance, the emitted
+        # columns and the row count untouched. Only the non-straddling check can
+        # notice, which is the point of logging it here.
+        #
+        # The `len(chunk) > 1` guard is what keeps that true. Splitting
+        # unconditionally makes `chunk.iloc[1:]` empty for a one-row chunk,
+        # which is a *second* broken invariant (line 63 above refuses to emit an
+        # empty chunk) and one that crashes three tests in `test_pipeline.py`
+        # and `test_synthesis_and_plugins.py` on `ValueError: zero-size array to
+        # reduction operation maximum`. Those reds say nothing about
+        # straddling, and they are enough on their own to report this entry
+        # CAUGHT with the whole non-straddling clause deleted, which would make
+        # the entry worthless as evidence for the thing it names. That is the
+        # #19 trap: plausible, green, proving nothing.
+        "#53 generator chunks whole entities (non-straddling)",
+        "src/synthweave/stages/generate.py",
+        """            emitted += len(chunk)
+            yield chunk
+""",
+        """            emitted += len(chunk)
+            if len(chunk) > 1:
+                yield chunk.iloc[:1]
+                yield chunk.iloc[1:]
+            else:
+                yield chunk
+""",
+    ),
+    (
+        "#61 find_stack_level walks out of the package instead of guessing",
+        "src/synthweave/_deprecation.py",
+        """    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and _is_ours(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    return level""",
+        """    return 2""",
+    ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
+    (
+        "#82 an empty table keeps the dtypes its rules declare",
+        "src/synthweave/pipeline.py",
+        """        return pd.DataFrame(
+            {
+                name: as_declared(rules[name], empty) if name in rules else empty
+                for name in columns
+            },
+            columns=columns,
+        )""",
+        "        return pd.DataFrame(columns=columns)",
     ),
 ]
 

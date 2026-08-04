@@ -23,11 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+import numpy as np
 import pandas as pd
 
 from .context import RunContext
 from .provenance import ProvenanceRecord
 from .registry import resolve
+from .rules import as_declared
 from .schema import Schema, Table
 from .validation import RESERVED_PREFIX, validate_schema
 
@@ -117,7 +119,7 @@ class Pipeline:
         """
         ctx = self._context()
         tables = {
-            table.name: _concat(self._stream(table, ctx), self._columns_of(table))
+            table.name: _concat(self._stream(table, ctx), self._empty_frame(table))
             for table in self.schema.tables
         }
         return PipelineResult(tables=tables, provenance=ctx.provenance, metadata=ctx.metadata)
@@ -154,6 +156,37 @@ class Pipeline:
         when a linker is actually configured to attach them."""
         return table.output_columns(with_identifiers=self.linker is not None)
 
+    def _empty_frame(self, table: Table) -> pd.DataFrame:
+        """The frame a table stands in with when it produced no rows at all.
+
+        Zero rows is data, not an error: coverage, presence, or an event count
+        of zero can legitimately exclude every entity. What must not change is
+        the table's *type*, because a caller writing the result to Parquet
+        would otherwise get one schema on a run that produced rows and another
+        on a run that did not.
+
+        There is nothing to infer a type from here, so each column is built by
+        the same `as_declared` call the generator ends every populated draw
+        with. That keeps one source of truth, the rule's own `dtype()`: this
+        path cannot drift from the populated one without the populated one
+        moving too. A column whose rule declares nothing (an identifier, a
+        grain column, a `Sequential`) is left `object`, exactly as before,
+        since a rule that will not name its type cannot be second-guessed
+        from zero rows.
+        """
+        entity = self.schema.entity(table.entity)
+        rules = {name: entity.attributes[name] for name in table.carry}
+        rules.update(table.columns)
+        empty = np.array([], dtype=object)
+        columns = self._columns_of(table)
+        return pd.DataFrame(
+            {
+                name: as_declared(rules[name], empty) if name in rules else empty
+                for name in columns
+            },
+            columns=columns,
+        )
+
     def stream(self, table_name: str) -> Iterator[pd.DataFrame]:
         """Chunks for one table, for a caller doing its own streaming."""
         return self._stream(self.schema.table(table_name), self._context())
@@ -165,14 +198,15 @@ def _strip_reserved(chunks: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         yield chunk.drop(columns=drop) if drop else chunk
 
 
-def _concat(chunks: Iterator[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
+def _concat(chunks: Iterator[pd.DataFrame], empty: pd.DataFrame) -> pd.DataFrame:
     collected = [c for c in chunks if len(c)]
     if not collected:
         # A table can legitimately end up with no rows, most often because
         # coverage excluded every entity. Handing back a frame with no columns
         # would mean downstream code cannot even read the schema it was
-        # promised, so the declared columns stand in.
-        return pd.DataFrame(columns=columns)
+        # promised, so the declared shape stands in. `empty` carries the
+        # declared dtypes too: see `Pipeline._empty_frame`.
+        return empty
     if len(collected) == 1:
         return collected[0].reset_index(drop=True)
     return pd.concat(collected, ignore_index=True)
