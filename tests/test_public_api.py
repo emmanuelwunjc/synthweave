@@ -46,6 +46,9 @@ EXPECTED = (
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
+    # conformance
+    "check_generator", "GeneratorConformanceError",
+    "check_synthesizer", "SynthesizerConformanceError",
     # mode
     "Mode", "ModeSchema",
     # pipeline
@@ -68,6 +71,7 @@ EXPECTED = (
 # Bound as a side effect of `from .schema import ...` and friends. Asserted
 # as-is; see the module docstring.
 EXPECTED_SUBMODULES = (
+    "conformance",
     "context",
     "fidelity",
     # `from .mode import Mode, ModeSchema` binds `mode` here too, exactly as

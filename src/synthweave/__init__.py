@@ -55,6 +55,12 @@ from importlib.metadata import version as _installed_version
 
 from ._deprecation import SynthweaveDeprecationWarning
 from ._hash import derive_id
+from .conformance import (
+    GeneratorConformanceError,
+    SynthesizerConformanceError,
+    check_generator,
+    check_synthesizer,
+)
 from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
 from .mode import Mode, ModeSchema
@@ -105,6 +111,9 @@ __all__ = [
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
+    # conformance
+    "check_generator", "GeneratorConformanceError",
+    "check_synthesizer", "SynthesizerConformanceError",
     # mode
     "Mode", "ModeSchema",
     # pipeline

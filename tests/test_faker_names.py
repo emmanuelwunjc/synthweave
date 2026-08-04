@@ -16,7 +16,7 @@ import pytest
 
 import invariants
 import synthweave as sw
-from synthweave.connectors.faker_names import Name, SSN
+from synthweave.connectors.faker_names import _FAKER_SUPPORTED, Name, SSN
 
 pytest.importorskip("faker")
 
@@ -174,7 +174,11 @@ def test_missing_provider_attribute_names_the_attribute_and_the_version(monkeypa
         Name("last_name")
     message = str(excinfo.value)
     assert "last_names" in message
-    assert "Faker>=20,<41" in message
+    # Not the literal range: asserting `"Faker>=20,<41"` here made this test
+    # agree with a stale message instead of catching it, since bumping
+    # `pyproject.toml` alone left both unchanged. `tests/test_faker_bound_sync.py`
+    # owns the version half of this and pins it to `pyproject.toml`.
+    assert _FAKER_SUPPORTED in message
 
 
 def test_empty_provider_mapping_is_rejected(monkeypatch):

@@ -698,6 +698,48 @@ MUTATIONS = [
         "        return pd.DataFrame(columns=columns)",
         "        return pd.DataFrame(columns=sorted(columns))",
     ),
+    # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
+    # exists for. Like every entry here the snippet is a literal snapshot, so a
+    # real bound change makes this STALE, which fails the run and points at the
+    # line to update. That is the intended way to find out, not a defect.
+    (
+        "N1 the Faker bound is single-sourced to pyproject.toml",
+        "pyproject.toml",
+        'pii = ["Faker>=20,<41"]',
+        'pii = ["Faker>=20,<42"]',
+    ),
+    (
+        # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
+        # that an entity's rows never straddle a boundary, and until #53 nothing
+        # asserted it. This entry breaks the guarantee in the shipped generator
+        # (one row, then the rest, so a chunk boundary lands inside the first
+        # entity) while leaving determinism, chunk invariance, the emitted
+        # columns and the row count untouched. Only the non-straddling check can
+        # notice, which is the point of logging it here.
+        #
+        # The `len(chunk) > 1` guard is what keeps that true. Splitting
+        # unconditionally makes `chunk.iloc[1:]` empty for a one-row chunk,
+        # which is a *second* broken invariant (line 63 above refuses to emit an
+        # empty chunk) and one that crashes three tests in `test_pipeline.py`
+        # and `test_synthesis_and_plugins.py` on `ValueError: zero-size array to
+        # reduction operation maximum`. Those reds say nothing about
+        # straddling, and they are enough on their own to report this entry
+        # CAUGHT with the whole non-straddling clause deleted, which would make
+        # the entry worthless as evidence for the thing it names. That is the
+        # #19 trap: plausible, green, proving nothing.
+        "#53 generator chunks whole entities (non-straddling)",
+        "src/synthweave/stages/generate.py",
+        """            emitted += len(chunk)
+            yield chunk
+""",
+        """            emitted += len(chunk)
+            if len(chunk) > 1:
+                yield chunk.iloc[:1]
+                yield chunk.iloc[1:]
+            else:
+                yield chunk
+""",
+    ),
     (
         "#61 find_stack_level walks out of the package instead of guessing",
         "src/synthweave/_deprecation.py",
