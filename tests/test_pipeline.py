@@ -793,7 +793,9 @@ def test_typos_leave_missing_values_alone(many_people):
     schema = sw.Schema(entities=[many_people], tables=[roster], seed=1)
 
     values = sw.Pipeline(schema, noiser=noiser).run()["roster"]["education"]
-    written = {v for v in values if v is not None}
+    # pd.notna, not `is not None`: pandas 3 spells a null in a text column as
+    # float nan, which `is not None` would let through into the `in` check below.
+    written = {v for v in values if pd.notna(v)}
     assert not any("None" in v for v in written)
 
 
