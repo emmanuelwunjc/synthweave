@@ -747,6 +747,44 @@ MUTATIONS = [
 """,
     ),
     (
+        "#61 find_stack_level walks out of the package instead of guessing",
+        "src/synthweave/_deprecation.py",
+        """    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and _is_ours(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    return level""",
+        """    return 2""",
+    ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
+    (
         "#82 an empty table keeps the dtypes its rules declare",
         "src/synthweave/pipeline.py",
         """        return pd.DataFrame(
