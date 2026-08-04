@@ -35,6 +35,7 @@ import concurrent.futures
 import os
 import pathlib
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -43,12 +44,45 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Copied per worker: everything except the version-control metadata and caches.
-# `.git` is skipped because it dominates the copy cost and because in a linked
-# worktree it is a file pointing at another directory, which would not survive
-# the copy anyway. One consequence, checked and accepted: `test_docs_map_sync`
-# self-skips without a git checkout, so it runs against the real tree but not
-# inside a sandbox. It guards a docs index, not any entry in MUTATIONS.
+#
+# Skipping `.git` is a deliberate narrowing, not an oversight, and it is not
+# free: the suite the sandbox runs is smaller than the one CI's `test` job
+# gates on. The tests that go missing are named in SANDBOX_BLIND_SPOT below,
+# and `report_blind_spot()` measures the gap on every run so it cannot widen
+# in silence.
+#
+# Why not carry `.git`. In a linked worktree `.git` is a *file* pointing at
+# another directory, so a plain copy either fails or produces a repo that
+# resolves back into the real checkout: local and CI behaviour would then
+# differ, which is the opposite of what this harness is for. Resolving
+# `--git-common-dir` and copying it is possible but pays ~12 MB per worker on
+# a 41 MB tree, once per `os.cpu_count()`. And it would not buy honesty: the
+# `@needs_git` tests ask `git check-ignore` about the *tracked* tree, so a
+# copied index describing the original checkout would answer about files that
+# are not the ones under test. `git init` in the sandbox is worse still (see
+# issue #131): a repo with no commits makes `tracked_files()` empty, and
+# `test_the_committed_tree_passes_its_own_guard` would pass while checking
+# nothing, the exact "test that cannot fail" shape CLAUDE.md warns about.
 SANDBOX_SKIP = (".git", "__pycache__", ".pytest_cache")
+
+# Test modules that cannot run inside a sandbox, and why. Declared here rather
+# than described in prose so `report_blind_spot()` can check the claim against
+# what the sandbox actually skips: a module that goes blind without being
+# listed here fails the run.
+SANDBOX_BLIND_SPOT = {
+    "tests/test_leak_guard.py": (
+        "the public-repo leak guard asks `git check-ignore` about the tracked "
+        "tree; every @needs_git test self-skips without a checkout"
+    ),
+    "tests/test_docs_map_sync.py": (
+        "compares docs/MAP.md against git's tracked-file list, which a "
+        "checkout-less tree cannot produce"
+    ),
+    "tests/test_mutation_shards.py": (
+        "one test measures this very blind spot by diffing a sandbox against "
+        "a real checkout, and a sandbox has no checkout to diff against"
+    ),
+}
 
 # Wall-clock bound on one suite run. A run that hits it is inconclusive, never
 # a pass and never a catch.
@@ -769,7 +803,11 @@ MUTATIONS = [
 ]
 
 
-def run_suite(cwd: pathlib.Path) -> tuple[str, str, str]:
+def run_suite(
+    cwd: pathlib.Path,
+    targets: tuple[str, ...] = ("tests/",),
+    extra: tuple[str, ...] = (),
+) -> tuple[str, str, str]:
     """Run the suite in `cwd`. Returns (outcome, summary line, full output)."""
     # Inherit the real environment and override only PYTHONPATH. Replacing it
     # outright used to work on a dev machine and fail on a CI runner, where
@@ -784,7 +822,8 @@ def run_suite(cwd: pathlib.Path) -> tuple[str, str, str]:
     env = {**os.environ, "PYTHONPATH": "src"}
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/", "-q", "--no-header", "-x", "-W", "error::UserWarning"],
+            [sys.executable, "-m", "pytest", *targets, "-q", "--no-header", "-x",
+             "-W", "error::UserWarning", *extra],
             cwd=cwd,
             env=env,
             capture_output=True,
@@ -799,6 +838,80 @@ def run_suite(cwd: pathlib.Path) -> tuple[str, str, str]:
     tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
     outcome = PASSED if proc.returncode == 0 else FAILED
     return outcome, (tail[-1] if tail else "no output"), output
+
+
+_SKIPPED_LINE = re.compile(r"^SKIPPED \[(\d+)\] ([^:\s]+):")
+
+
+def skips_by_module(output: str) -> dict[str, int]:
+    """Total the `-rs` short summary's skips per test module."""
+    counts: dict[str, int] = {}
+    for line in output.splitlines():
+        found = _SKIPPED_LINE.match(line.strip())
+        if found:
+            counts[found.group(2)] = counts.get(found.group(2), 0) + int(found.group(1))
+    return counts
+
+
+def blind_spot(sandbox_output: str, checkout_output: str) -> dict[str, int]:
+    """Tests the sandbox skips that a real checkout runs, per module.
+
+    A module that skips for the same reason in both trees (SSA_NAMES_ZIP being
+    unset, say) is not a blind spot; only the extra skips the sandbox itself
+    causes are.
+    """
+    checkout = skips_by_module(checkout_output)
+    extra = {}
+    for module, count in skips_by_module(sandbox_output).items():
+        lost = count - checkout.get(module, 0)
+        if lost > 0:
+            extra[module] = lost
+    return extra
+
+
+def undeclared_blind_spot(measured: dict[str, int]) -> dict[str, int]:
+    """The measured blind spot minus what SANDBOX_BLIND_SPOT admits to."""
+    return {m: n for m, n in measured.items() if m not in SANDBOX_BLIND_SPOT}
+
+
+def report_blind_spot(baseline_output: str) -> int:
+    """Print the sandbox-versus-checkout skip delta; 1 if it is wider than declared.
+
+    The baseline run's own `-rs` summary names every module that skipped in the
+    sandbox. Only those modules are re-run against the real checkout, so the
+    measurement costs one short pytest run rather than a second full suite.
+    """
+    suspects = sorted(skips_by_module(baseline_output))
+    if not suspects:
+        print("sandbox skew: nothing skipped in the sandbox")
+        return 0
+
+    outcome, msg, checkout_output = run_suite(
+        ROOT, tuple(suspects), ("-rs", "-p", "no:cacheprovider")
+    )
+    if outcome != PASSED:
+        # Not fatal here: the `test` job gates the real tree. Say so rather
+        # than print a delta measured against a run that did not complete.
+        print(f"sandbox skew: not measured, the checkout probe run {outcome} ({msg})")
+        return 0
+
+    measured = blind_spot(baseline_output, checkout_output)
+    if not measured:
+        print("sandbox skew: none, the sandbox runs every test the checkout does")
+        return 0
+
+    total = sum(measured.values())
+    detail = ", ".join(f"{module} ({count})" for module, count in sorted(measured.items()))
+    print(f"sandbox skew: {total} test(s) skip in the sandbox but run in the checkout: {detail}")
+
+    undeclared = undeclared_blind_spot(measured)
+    if undeclared:
+        print("\nthese modules go blind in the sandbox and are not declared in SANDBOX_BLIND_SPOT:")
+        for module, count in sorted(undeclared.items()):
+            print(f"  - {module} ({count} test(s))")
+        print("  declare them with a reason, or make the sandbox carry what they need")
+        return 1
+    return 0
 
 
 def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
@@ -880,7 +993,7 @@ def main(argv: list[str]) -> int:
 
         print(f"baseline ({workers} workers): ", end="", flush=True)
         first = sandboxes.get()
-        outcome, msg, output = run_suite(first)
+        outcome, msg, output = run_suite(first, extra=("-rs",))
         sandboxes.put(first)
         print(f"{'PASS' if outcome == PASSED else 'FAIL'}  {msg}")
         if outcome != PASSED:
@@ -890,6 +1003,12 @@ def main(argv: list[str]) -> int:
             print("\n--- baseline failure output ---")
             print(output)
             print("baseline must pass before mutating")
+            return 1
+
+        # The baseline PASS above is earned over the sandbox's suite, which is
+        # not quite the checkout's. Say by how much, and refuse to run if the
+        # difference is wider than SANDBOX_BLIND_SPOT admits.
+        if report_blind_spot(output):
             return 1
 
         failures: dict[str, list[str]] = {verdict: [] for verdict in FAILURE_HEADLINE}
