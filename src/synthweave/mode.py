@@ -391,9 +391,20 @@ class ScopeMode(Mode):
         self._scope_epsilon: dict[str, float] = {}
         self._fetched: pd.DataFrame | None = None
 
-    def _build_rule(
-        self, name: str, *, variable: str | None = None, epsilon: float | None = None
-    ) -> Rule:
+    def _build_rule(self, name: str, **kwargs: Any) -> Rule:
+        # Take **kwargs rather than keyword-only parameters for the same
+        # reason RealDataMode does: a narrow signature answers a stray kwarg
+        # with Python's own TypeError, which names this private method rather
+        # than the attribute, and contradicts GUIDE.md's promise that every
+        # mode rejects an unknown keyword by name with a ValueError.
+        variable = kwargs.pop("variable", None)
+        epsilon = kwargs.pop("epsilon", None)
+        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: scope mode takes only variable and "
+                f"epsilon, got {sorted(kwargs)}; the column's distribution "
+                "comes from the fetched ACS rows, not from a declared rule"
+            )
         if variable is None:
             raise ValueError(f"attribute {name!r}: scope mode needs variable=")
         if epsilon is not None:
