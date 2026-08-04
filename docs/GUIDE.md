@@ -76,13 +76,13 @@ number. One `sw.Schema(...)` object describes an entire dataset.
 
 **Seed** — a number (or string) that fully determines the output. Same
 schema, same seed, same data, every single time, on any machine. Change the
-seed and you get a different (but equally valid) random draw. (One honest
-caveat: the `synthesize` stage's model-fitting step uses scikit-learn's
-decision trees, which don't take an explicit seed from synthweave. This
-hasn't produced any observed non-determinism across repeated fresh-process
-runs, but unlike literally everything else in synthweave, it isn't derived
-from the seed by construction. Worth knowing if bit-for-bit reproducibility
-matters to you as a hard guarantee.)
+seed and you get a different (but equally valid) random draw. That holds
+for every stage, including `synthesize`: the decision trees it fits are
+given a `random_state` derived from your seed and the name of the column
+being fitted, so even the tie-breaks between two equally good splits come
+out the same on every fit. Nothing in synthweave draws from an unseeded
+source of randomness, so bit-for-bit reproducibility is a guarantee rather
+than an observation.
 
 ### Rules: how one value gets chosen
 
