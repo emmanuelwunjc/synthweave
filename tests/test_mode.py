@@ -7,7 +7,9 @@ table()/schema(), assert on the result or on a pipeline run.
 
 from __future__ import annotations
 
+import json
 import re
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -314,3 +316,215 @@ def test_schema_run_synthesizes_real_data_columns_from_the_donor_pool(donor_fram
 
     invariants.assert_values_come_from(result["roster"], "education", donor_frame["education"])
     invariants.assert_values_come_from(result["roster"], "wage", donor_frame["wage"])
+
+
+# --- sw.Mode.scope(): wraps the ACS PUMS connector -------------------------
+
+_ACS_PAYLOAD = [["AGEP", "PINCP", "state"]] + [
+    [str(20 + i % 50), str(20_000 + i * 137), "36"] for i in range(200)
+]
+
+
+def _mock_acs_response(status: int = 200):
+    response = MagicMock()
+    response.status = status
+    response.read.return_value = json.dumps(_ACS_PAYLOAD).encode()
+    response.__enter__.return_value = response
+    return response
+
+
+@pytest.fixture(autouse=True)
+def _acs_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CENSUS_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.mark.parametrize("area_code", ["NY", "New York", "36"])
+def test_scope_constructs_from_any_form_resolve_state_accepts(area_code):
+    m = sw.Mode.scope(area_code=area_code)
+    assert isinstance(m, sw.Mode)
+
+
+def test_attribute_without_variable_raises_naming_it():
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage")
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_epsilon(bad):
+    """Scope reaches the same clamp real_data does, so it needs the same guard.
+
+    `_cart_knobs` turns 0 or -1 into 0.01 and hands back the most generalized
+    column the mapping can produce. That is a plausible-looking result for
+    what is really a typo, and it is worse here than in real_data mode: the
+    donor rows are real Census respondents, so a silently mangled epsilon is
+    a silently wrong disclosure posture.
+    """
+    with pytest.raises(ValueError, match="positive"):
+        sw.Mode.scope(area_code="NY", epsilon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_scope_rejects_a_non_positive_per_attribute_epsilon(bad):
+    """The per-column override reaches the same clamp, so it gets the same guard."""
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="positive"):
+        m.attribute("wage", variable="PINCP", epsilon=bad)
+
+
+def test_attribute_with_variable_registers_it():
+    m = sw.Mode.scope(area_code="NY")
+    m.attribute("wage", variable="PINCP")
+    assert m._variables["wage"] == "PINCP"
+
+
+def test_two_attributes_can_share_one_acs_variable():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=50, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        result = m.schema(entities=[person], tables=[table], seed=5).run()
+
+    donor_wages = {20_000 + i * 137 for i in range(200)}
+    assert set(result["roster"]["wage"]) <= donor_wages
+    assert set(result["roster"]["earnings"]) <= donor_wages
+
+
+def test_a_shared_acs_variable_is_requested_once():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    earnings = m.attribute("earnings", variable="PINCP")
+    person = m.entity(
+        "person", count=10, attributes={"wage": wage, "earnings": earnings}
+    )
+    table = m.table("roster", grain="person", carry=["wage", "earnings"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        m.schema(entities=[person], tables=[table], seed=5).run()
+
+    requested = urlopen.call_args.args[0]
+    assert requested.count("PINCP") == 1
+
+
+def test_scope_generalizes_the_fetched_rows_by_epsilon():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP")
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    # epsilon 0.5 asks for a shallow tree, not CART's unbounded default.
+    assert synthesizer.max_depth == 2
+
+
+def test_scope_attribute_epsilon_overrides_the_mode_level_default():
+    m = sw.Mode.scope(area_code="NY", epsilon=0.5)
+    m.attribute("wage", variable="PINCP", epsilon=1.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert synthesizer.max_depth == 4
+
+
+def test_scope_attributes_at_different_epsilons_get_two_synthesizers():
+    m = sw.Mode.scope(area_code="NY")
+    m.attribute("wage", variable="PINCP", epsilon=0.5)
+    m.attribute("age", variable="AGEP", epsilon=2.0)
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        synthesizer = m._extra_pipeline_kwargs()["synthesizer"]
+
+    assert not isinstance(synthesizer, sw.CARTSynthesizer)
+    assert {tuple(s.columns) for s in synthesizer.synthesizers} == {("wage",), ("age",)}
+    assert {s.max_depth for s in synthesizer.synthesizers} == {2, 8}
+
+
+def test_scopes_docstring_first_sentence_states_state_level_only():
+    first_sentence = sw.Mode.scope.__doc__.strip().split(".")[0]
+    assert "state-level ACS geography only" in first_sentence
+
+
+def test_scopes_docstring_disclaims_differential_privacy():
+    assert "differential privacy" in sw.Mode.scope.__doc__.lower()
+
+
+def test_schema_run_calls_fetch_pums_once_for_every_attribute_combined():
+    m = sw.Mode.scope(area_code="NY")
+    age = m.attribute("age", variable="AGEP")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"age": age, "wage": wage})
+    table = m.table("roster", grain="person", carry=["age", "wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        m.schema(entities=[person], tables=[table], seed=5).run()
+
+    assert urlopen.call_count == 1
+
+
+def test_a_second_run_on_the_same_schema_does_not_refetch():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        schema = m.schema(entities=[person], tables=[table], seed=5)
+        schema.run()
+        first_count = urlopen.call_count
+        schema.run()
+        assert urlopen.call_count == first_count
+
+
+def test_schema_defers_the_fetch_until_run():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()) as urlopen:
+        schema = m.schema(entities=[person], tables=[table], seed=5)
+        assert urlopen.call_count == 0
+        schema.run()
+        assert urlopen.call_count == 1
+
+
+def test_an_unrecognized_area_code_raises_on_run_not_on_schema():
+    m = sw.Mode.scope(area_code="Nowhere")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    schema = m.schema(entities=[person], tables=[table], seed=5)
+    with pytest.raises(ValueError, match="Nowhere"):
+        schema.run()
+
+
+def test_schema_run_synthesizes_from_real_acs_rows():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=50, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response()):
+        result = m.schema(entities=[person], tables=[table], seed=5).run()
+
+    donor_wages = {20_000 + i * 137 for i in range(200)}
+    assert set(result["roster"]["wage"]) <= donor_wages
+
+
+def test_fetch_pums_failure_propagates_unchanged():
+    m = sw.Mode.scope(area_code="NY")
+    wage = m.attribute("wage", variable="PINCP")
+    person = m.entity("person", count=10, attributes={"wage": wage})
+    table = m.table("roster", grain="person", carry=["wage"])
+
+    with patch("urllib.request.urlopen", return_value=_mock_acs_response(status=500)):
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            m.schema(entities=[person], tables=[table], seed=5).run()

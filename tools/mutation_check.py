@@ -433,6 +433,30 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#89.1 two attributes sharing one ACS variable both keep a column",
+        "src/synthweave/mode.py",
+        "            self._fetched = pd.DataFrame(\n                {name: fetched[variable] for name, variable in self._variables.items()}\n            )",
+        "            self._fetched = fetched.rename(\n                columns={variable: name for name, variable in self._variables.items()}\n            )",
+    ),
+    (
+        "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
+        "src/synthweave/mode.py",
+        '        return {"synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched)}',
+        '        return {"synthesizer": _empirical_cart(list(self._variables), self._fetched)}',
+    ),
+    (
+        "#89.3 scope epsilon is validated, not clamped (mode level)",
+        "src/synthweave/mode.py",
+        '        _check_epsilon(epsilon, "scope")\n',
+        "",
+    ),
+    (
+        "#89.4 scope epsilon is validated, not clamped (per attribute)",
+        "src/synthweave/mode.py",
+        '        if epsilon is not None:\n            _check_epsilon(epsilon, f"attribute {name!r}")\n        self._variables[name] = variable',
+        "        self._variables[name] = variable",
+    ),
+    (
         "#88 non-positive real_data epsilon rejected instead of clamped to 0.01",
         "src/synthweave/mode.py",
         '    if epsilon <= 0:\n        raise ValueError(f"{where}: epsilon must be positive, got {epsilon!r}")',
@@ -502,11 +526,22 @@ MUTATIONS = [
     (
         "#60 PackageNotFoundError stays out of the public namespace",
         "src/synthweave/__init__.py",
+        # Not a literal revert, deliberately. Before #60 the module both
+        # imported `PackageNotFoundError` un-aliased *and* caught it un-aliased
+        # forty lines later, so undoing the fix for real spans two hunks and an
+        # entry here carries exactly one contiguous snippet. The alias
+        # assignment keeps the `except _PackageNotFoundError` clause bound
+        # while restoring the public leak, which is the property under test.
+        # An earlier form appended a duplicate un-aliased import instead; it
+        # was CAUGHT too, but left the sandbox tree failing pyflakes with
+        # "imported but unused", i.e. a mutation no reviewer would accept as a
+        # plausible edit.
         "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
         "from importlib.metadata import version as _installed_version",
         "from importlib.metadata import PackageNotFoundError\n"
-        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
-        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import version as _installed_version\n"
+        "\n"
+        "_PackageNotFoundError = PackageNotFoundError",
     ),
     (
         "#63 faker_names validates Faker's private provider shape",
@@ -569,6 +604,99 @@ MUTATIONS = [
         "src/synthweave/stages/synthesize.py",
         "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
         "",
+    ),
+    # --- #65 the derivation layer ------------------------------------------
+    # Every value in the library routes through `_hash`, so a corruption here
+    # is silently wrong everywhere at once. These deliberately are not
+    # "delete the guard" mutations: each one is the shape a real arithmetic
+    # slip would take, which is what the existing entries did not cover.
+    (
+        "#65 hash_key keeps seed and salt separated",
+        "src/synthweave/_hash.py",
+        'return hashlib.sha256(f"{seed}\\x00{salt}".encode()).hexdigest()[:16]',
+        'return hashlib.sha256(f"{seed}{salt}".encode()).hexdigest()[:16]',
+    ),
+    (
+        "#65 the salt reaches the hash key (independent draws per salt)",
+        "src/synthweave/_hash.py",
+        'hash_key=hash_key(seed, salt)',
+        'hash_key=hash_key(seed, "")',
+    ),
+    (
+        "#65 unit() divides by the full uint64 width",
+        "src/synthweave/_hash.py",
+        "_SCALE = np.float64(2.0**64)",
+        "_SCALE = np.float64(2.0**63)",
+    ),
+    (
+        "#65 integers() span excludes `high`",
+        "src/synthweave/_hash.py",
+        "    span = np.uint64(high - low)",
+        "    span = np.uint64(high - low + 1)",
+    ),
+    (
+        "#65 normal() Box-Muller radius keeps the -2 factor",
+        "src/synthweave/_hash.py",
+        "    z = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
+        "    z = np.sqrt(-1.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
+    ),
+    (
+        "#65 unweighted pick() spreads over every value",
+        "src/synthweave/_hash.py",
+        "        idx = np.minimum((u * len(values)).astype(np.int64), len(values) - 1)",
+        "        idx = np.minimum((u * (len(values) - 1)).astype(np.int64), len(values) - 1)",
+    ),
+    (
+        "#65 weighted pick() normalizes the weights before the cumsum",
+        "src/synthweave/_hash.py",
+        "        idx = np.searchsorted(np.cumsum(w / total), u, side=\"right\")",
+        "        idx = np.searchsorted(np.cumsum(w), u, side=\"right\")",
+    ),
+    (
+        "#65 derive_id() zero-pads to the declared width",
+        "src/synthweave/_hash.py",
+        '    text = np.char.zfill(n.astype("U"), digits)',
+        '    text = n.astype("U")',
+    ),
+    (
+        "#65 derive_id() uses the full declared keyspace",
+        "src/synthweave/_hash.py",
+        "    modulus = 10**digits",
+        "    modulus = 10 ** (digits - 1)",
+    ),
+    (
+        "#65 derive_id() namespaces by tag, so two tags are unrelated",
+        "src/synthweave/_hash.py",
+        '    n = (hash_u64(keys, seed, f"id\\x00{tag}") % np.uint64(modulus)).astype(np.int64)',
+        '    n = (hash_u64(keys, seed, "id") % np.uint64(modulus)).astype(np.int64)',
+    ),
+    # --- #65 subtler corruptions of already-mutated code --------------------
+    # The existing entries for these lines only delete the guard. A wrong
+    # constant or a dropped term leaves the guard in place and still produces
+    # wrong output, which is what a real bug looks like.
+    (
+        "#65 TOLERABLE_COLLISIONS stays at one expected collision",
+        "src/synthweave/validation.py",
+        "TOLERABLE_COLLISIONS = 1",
+        "TOLERABLE_COLLISIONS = 1000",
+    ),
+    (
+        "#65 the collision bound is quadratic in population (birthday bound)",
+        "src/synthweave/validation.py",
+        "    return population * population / (2 * 10**digits)",
+        "    return population / (2 * 10**digits)",
+    ),
+    (
+        "#65 own() copies a frame pandas flagged as a copy, not only a view",
+        "src/synthweave/stages/base.py",
+        '    if getattr(chunk, "_is_view", False) or getattr(chunk, "_is_copy", None) is not None:',
+        '    if getattr(chunk, "_is_view", False):',
+    ),
+    (
+        "#65 an empty table keeps its declared column order, not a sorted one",
+        "src/synthweave/pipeline.py",
+        "        return pd.DataFrame(columns=columns)",
+        "        return pd.DataFrame(columns=sorted(columns))",
     ),
     (
         # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
