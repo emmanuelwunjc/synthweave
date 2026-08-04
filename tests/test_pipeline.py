@@ -1030,11 +1030,6 @@ def test_typo_corrupts_non_ascii_values_without_breaking():
     )
 
 
-@pytest.mark.xfail(
-    reason="#81: Typo picks one position uniformly, then finds no keyboard neighbour "
-    "for it, so a value with no Latin characters is never corrupted at all",
-    strict=False,
-)
 def test_typo_corrupts_a_value_with_no_latin_characters():
     """The half of the claim above that `Ünüver` cannot make.
 
@@ -1044,8 +1039,8 @@ def test_typo_corrupts_a_value_with_no_latin_characters():
     is the one that cannot be corrupted by accident.
 
     Written against the behaviour `Typo` claims rather than against today's
-    output, so it turns from xfail to xpass when #81 is fixed. Delete the
-    marker then.
+    output, so it was carried as an `xfail` until #81 was fixed (script-
+    agnostic transposition and duplication). It passes on its own now.
     """
     pairs = _typo_pairs()
     for value in ("北京市", "Ωμέγα"):
