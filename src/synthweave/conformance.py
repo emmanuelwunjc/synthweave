@@ -29,6 +29,12 @@ prefix is load-bearing rather than cosmetic: a conformance check can go red
 for a reason other than the one a test meant to provoke, and the prefix is
 what lets that test assert it went red for the guarantee it named instead of
 an incidental one. A third checker added here follows the same shape.
+
+A `ValueError` from either checker means something different from a
+conformance error: the candidate is not accused of anything, the harness was
+configured so that part of the contract could not be tested. Refusing to
+certify is the only honest answer there, so neither checker returns `None`
+after skipping a clause.
 """
 
 from __future__ import annotations
@@ -84,7 +90,10 @@ def check_synthesizer(
     Clauses 4 and 5 are only as strong as the configuration they run
     under: a synthesizer whose fit cap sits above the whole fixture never
     exercises its buffering, so check it configured the way it will really be
-    used.
+    used. Clause 5 needs a chunk boundary to mean anything at all, so a
+    `split_chunk_size` that leaves the table in one chunk is refused with
+    `ValueError` rather than passed. Within that, it tries the one boundary
+    that size produces and no others.
 
     `table` names which of `schema`'s tables to run against, and may be
     omitted only when the schema has exactly one. `columns` names the columns
@@ -95,13 +104,13 @@ def check_synthesizer(
 
     source = resolve("generator", generator)
     baseline_input = _emit(source, target, schema, chunk_size)
-    baseline = _apply(synthesizer, source, target, schema, chunk_size)
+    baseline, _ = _apply(synthesizer, source, target, schema, chunk_size)
 
     _check_rows_survive(baseline_input, baseline)
     _check_columns_survive(baseline_input, baseline)
     _check_undeclared_columns_untouched(baseline_input, baseline, declared)
 
-    repeat = _apply(synthesizer, source, target, schema, chunk_size)
+    repeat, _ = _apply(synthesizer, source, target, schema, chunk_size)
     _check_same_frame(
         "determinism",
         baseline,
@@ -111,7 +120,7 @@ def check_synthesizer(
         "from the row key)",
     )
 
-    split = _apply(synthesizer, source, target, schema, split_chunk_size)
+    split, split_chunks = _apply(synthesizer, source, target, schema, split_chunk_size)
     _check_same_frame(
         "chunk invariance",
         baseline,
@@ -120,6 +129,10 @@ def check_synthesizer(
         f"{chunk_size} changed the output (it is not chunk invariant, e.g. it reads "
         "chunk-level state or fits on whatever rows one chunk happened to hold). "
         "chunk_size is a memory knob and nothing else",
+    )
+
+    _require_a_chunk_boundary(
+        split_chunks, split_chunk_size, "clause 5 (chunk invariance)"
     )
 
 
@@ -268,18 +281,45 @@ def _emit(source: Any, table: Table, schema: Schema, chunk_size: int) -> pd.Data
     return _collect(source.emit(table, ctx))
 
 
+class _Counted:
+    """Passes chunks straight through, counting the non-empty ones.
+
+    Counted on the way in rather than by re-emitting, so the number is what
+    the candidate was actually handed. Empty chunks are not counted because
+    they are not boundaries: no row lies on either side of one, so a run that
+    emitted one real chunk and one empty one has nothing more to inspect than
+    a run that emitted one.
+    """
+
+    def __init__(self, chunks: Iterable[pd.DataFrame]) -> None:
+        self._chunks = chunks
+        self.count = 0
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            if len(chunk):
+                self.count += 1
+            yield chunk
+
+
 def _apply(
     synthesizer: Any, source: Any, table: Table, schema: Schema, chunk_size: int
-) -> pd.DataFrame:
-    """The synthesizer's output over freshly generated chunks, as one frame.
+) -> tuple[pd.DataFrame, int]:
+    """The synthesizer's output over freshly generated chunks, plus how many
+    chunks it was handed.
 
     Chunks are re-emitted per call rather than replayed from a list, so the
     synthesizer sees the chunk boundaries the pipeline would really hand it
     at this `chunk_size`, and each call gets its own `RunContext` exactly as
     a separate `Pipeline.run()` would.
+
+    The count comes back because clause 5 is about a chunk boundary, and a
+    `chunk_size` that produced no boundary makes it vacuous. See
+    `_require_a_chunk_boundary`.
     """
     ctx = RunContext(schema=schema, chunk_size=chunk_size)
-    return _collect(synthesizer.run(source.emit(table, ctx), table, ctx))
+    given = _Counted(source.emit(table, ctx))
+    return _collect(synthesizer.run(given, table, ctx)), given.count
 
 
 def _differing_rows(before: pd.Series, after: pd.Series) -> np.ndarray:
@@ -293,6 +333,36 @@ def _show(before: pd.Series, after: pd.Series, rows: np.ndarray, limit: int = 3)
     return ", ".join(
         f"row {int(i)}: expected {before.iloc[int(i)]!r}, got {after.iloc[int(i)]!r}"
         for i in rows[:limit]
+    )
+
+
+def _require_a_chunk_boundary(chunks: int, split_chunk_size: int, clauses: str) -> None:
+    """Refuse to certify clauses that had no chunk boundary to inspect.
+
+    The clauses this guards are about what happens *at* a boundary. When
+    `split_chunk_size` leaves the whole table in one chunk there is no
+    boundary, they pass having examined nothing, and the harness returns
+    `None` exactly as it does for a candidate it genuinely verified. That is a
+    green result that proves nothing, produced by the harness built to prevent
+    exactly that, so it raises instead.
+
+    `ValueError`, not a conformance error: the candidate did nothing wrong.
+    The harness was configured so that part of it could not be tested, and
+    that is the caller's to fix.
+
+    Called after every clause has run, so a candidate that really is broken is
+    told which guarantee it broke rather than being handed a configuration
+    complaint about a check that had already failed.
+    """
+    if chunks >= 2:
+        return
+    raise ValueError(
+        f"split_chunk_size={split_chunk_size} left the whole table in {chunks} chunk(s), "
+        f"so there was no chunk boundary to inspect and {clauses} passed without testing "
+        "anything. Pass a smaller split_chunk_size (down to 1, which puts one entity per "
+        "chunk), or check against a schema with more entities: chunking is over entities "
+        "so that an entity's rows never straddle a boundary, which means a table covering "
+        "a single entity cannot be split at any size."
     )
 
 
@@ -351,7 +421,10 @@ def check_generator(
     when the schema has exactly one. `split_chunk_size` must be small enough
     to split that table into several chunks: clauses 3 and 4 are about chunk
     boundaries, and a size that leaves the whole table in one chunk cannot
-    show a boundary problem at all.
+    show a boundary problem at all. That is checked rather than left to the
+    caller to get right, and a size that does not split raises `ValueError`.
+    Refusing beats certifying: a pass that skipped two of the five clauses is
+    indistinguishable from one that earned all five.
     """
     target = _target_table(schema, table, kind="generator")
 
@@ -365,6 +438,12 @@ def check_generator(
     _check_entity_non_straddling(split, split_chunk_size)
     _check_chunk_invariance(baseline, split, split_chunk_size)
     _check_row_count(split, target, schema)
+
+    _require_a_chunk_boundary(
+        sum(1 for chunk in split if len(chunk)),
+        split_chunk_size,
+        "clauses 3 (entity non-straddling) and 4 (chunk invariance)",
+    )
 
 
 # --- stage 1's individual checks --------------------------------------------

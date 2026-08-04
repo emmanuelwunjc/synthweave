@@ -284,3 +284,44 @@ def test_a_synthesizer_that_does_not_say_what_it_writes_is_refused(careers):
     with pytest.raises(ValueError, match="columns="):
         sw.check_synthesizer(Anonymous(), careers)
     sw.check_synthesizer(Anonymous(), careers, columns=["wage"])
+
+
+@pytest.fixture
+def tiny() -> sw.Schema:
+    """Three entities: too few for the default `split_chunk_size` to cut.
+
+    `check_generator` had the same hole on the same fixture shape (issue
+    #150), and the reason is shared: chunking is over entities, so a table
+    with few enough of them lands in one chunk however the size is set.
+    """
+    person = sw.Entity(
+        "person",
+        count=3,
+        attributes={"e": sw.Choice(["a", "b"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "small",
+        grain=sw.PerEvent("person", low=1, high=3),
+        carry=["e"],
+        columns={"wage": sw.Uniform(0, 1)},
+    )
+    return sw.Schema(entities=[person], tables=[table], seed=1)
+
+
+def test_a_split_size_that_does_not_split_is_refused(tiny):
+    """Clause 5 is about what happens across a chunk boundary, so a
+    `split_chunk_size` that leaves the whole table in one chunk compares a run
+    against itself and passes having tested nothing. The same gap #150 found
+    in `check_generator`, and refused the same way: a caller error, so
+    `ValueError`, not `SynthesizerConformanceError`.
+    """
+    with pytest.raises(ValueError, match="split_chunk_size"):
+        sw.check_synthesizer(KeyedSynth(), tiny)
+
+
+def test_a_split_size_small_enough_to_cut_the_tiny_schema_is_accepted(tiny):
+    """The refusal names a fix, and this is it. Without this the guard could
+    be refusing every small schema rather than only the sizes that cannot
+    split one."""
+    sw.check_synthesizer(KeyedSynth(), tiny, split_chunk_size=1)
