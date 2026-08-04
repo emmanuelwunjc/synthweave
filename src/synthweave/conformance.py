@@ -1,9 +1,14 @@
-"""`check_synthesizer`: the conformance harness for a custom `Synthesizer`.
+"""`check_generator` and `check_synthesizer`: conformance harnesses for stages.
 
-The synthesizer-shaped analogue of `check_rule`. `Synthesizer` is a
-`runtime_checkable` Protocol matched on `run` alone, so `isinstance` says
-nothing about the guarantees the stage docstrings promise. This runs a
-candidate over real generated chunks and checks each of those guarantees,
+One public checker per registry kind, so a plugin author has a mechanical way
+to verify the contracts their implementation must honour rather than reading
+them out of docstrings. `check_rule` (in `rules.py`, where `Rule` lives) is the
+same idea for the smallest of them.
+
+`check_synthesizer` is the synthesizer-shaped analogue of `check_rule`.
+`Synthesizer` is a `runtime_checkable` Protocol matched on `run` alone, so
+`isinstance` says nothing about the guarantees the stage docstrings promise.
+This runs a candidate over real generated chunks and checks each guarantee,
 raising `SynthesizerConformanceError` naming which one broke.
 
     sw.check_synthesizer(MySynthesizer(columns=["wage"]), schema)
@@ -11,6 +16,12 @@ raising `SynthesizerConformanceError` naming which one broke.
 Nothing here is specific to a built-in: the harness takes any object with a
 `run(chunks, table, ctx)`, which is what lets a plugin author check their own
 implementation against the same contract the built-ins meet.
+
+`check_generator` does the same for stage 1, over the five guarantees a
+generator makes about the chunks it emits. It needs a whole `Schema` rather
+than a bare object, because a generator's output is a function of the config
+and nothing else; that is a real ergonomic difference from `check_rule`, and
+the reason it takes `schema` positionally.
 """
 
 from __future__ import annotations
@@ -22,8 +33,8 @@ import pandas as pd
 
 from .context import RunContext
 from .registry import resolve
-from .schema import Schema, Table
-from .validation import ROW_KEY
+from .schema import PerEntity, Schema, Table
+from .validation import ENTITY_KEY, RESERVED_PREFIX, ROW_KEY
 
 
 class SynthesizerConformanceError(AssertionError):
@@ -186,14 +197,16 @@ def _check_same_frame(expected: pd.DataFrame, actual: pd.DataFrame, reason: str)
 # --- plumbing ---------------------------------------------------------------
 
 
-def _target_table(schema: Schema, table: str | None) -> Table:
+def _target_table(
+    schema: Schema, table: str | None, *, kind: str = "synthesizer"
+) -> Table:
     if table is not None:
         return schema.table(table)
     if len(schema.tables) != 1:
         raise ValueError(
             f"schema has {len(schema.tables)} tables "
             f"({sorted(t.name for t in schema.tables)}); pass table= to name the one "
-            "to check the synthesizer against"
+            f"to check the {kind} against"
         )
     return schema.tables[0]
 
@@ -248,3 +261,233 @@ def _collect(chunks: Iterable[pd.DataFrame]) -> pd.DataFrame:
     if not collected:
         return pd.DataFrame()
     return pd.concat(collected, ignore_index=True)
+
+
+# --- stage 1 ----------------------------------------------------------------
+
+
+class GeneratorConformanceError(AssertionError):
+    """A custom Generator broke one of the guarantees `check_generator` verifies."""
+
+
+def check_generator(
+    generator: Any,
+    schema: Schema,
+    *,
+    table: str | None = None,
+    chunk_size: int = 100_000,
+    split_chunk_size: int = 13,
+) -> None:
+    """Verify a generator honours the guarantees stage 1 promises.
+
+    Runs `generator.emit` over one of `schema`'s tables at two chunk sizes and
+    checks, in order:
+
+    1. Determinism. Two runs of the same table at the same chunk size agree,
+       so no hidden RNG state is involved.
+    2. Emitted columns. Every chunk carries the reserved bookkeeping keys that
+       later stages derive from, plus exactly the columns the table declares,
+       in the order `Table.output_columns` promises.
+    3. Entity non-straddling. Every row belonging to one entity arrives in the
+       same chunk. Generation chunks over entities rather than rows precisely
+       so that "an entity's rows never straddle a boundary", which is what
+       lets a consumer treat one chunk as self describing. A generator that
+       sliced by rows instead would satisfy every other clause here and still
+       hand that consumer half an entity, so nothing but this clause can see
+       it.
+    4. Chunk invariance. Running at `split_chunk_size` yields the same rows as
+       at `chunk_size`. chunk_size is a memory knob and nothing else.
+    5. Row count. A `PerEntity` table at `coverage=1.0` has exactly one row per
+       declared entity. Stated only for that case, because it is the only one
+       where config alone fixes the answer: `PerEvent` draws its own row count
+       and `coverage` below 1.0 keeps a hash-selected subset, so neither has a
+       number to compare against. On any other table the clause is skipped,
+       and an entity the generator silently omits there is invisible to it.
+
+    Raises `GeneratorConformanceError` naming which clause broke, or returns
+    `None` if the generator passes all five.
+
+    `table` names which of `schema`'s tables to emit, and may be omitted only
+    when the schema has exactly one. `split_chunk_size` must be small enough
+    to split that table into several chunks: clauses 3 and 4 are about chunk
+    boundaries, and a size that leaves the whole table in one chunk cannot
+    show a boundary problem at all.
+    """
+    target = _target_table(schema, table, kind="generator")
+
+    baseline = _generator_chunks(generator, target, schema, chunk_size)
+    _check_generator_determinism(
+        baseline, _generator_chunks(generator, target, schema, chunk_size)
+    )
+
+    split = _generator_chunks(generator, target, schema, split_chunk_size)
+    _check_emitted_columns(split, target)
+    _check_entity_non_straddling(split, split_chunk_size)
+    _check_chunk_invariance(baseline, split, split_chunk_size)
+    _check_row_count(split, target, schema)
+
+
+# --- stage 1's individual checks --------------------------------------------
+
+
+def _check_generator_determinism(
+    first: list[pd.DataFrame], second: list[pd.DataFrame]
+) -> None:
+    """Clause 1. Two runs of the same table at the same chunk size agree."""
+    _check_same_rows(
+        "determinism", _collect(first), _collect(second), "a second emit() of the same table"
+    )
+
+
+def _check_emitted_columns(chunks: list[pd.DataFrame], table: Table) -> None:
+    """Clause 2. Each chunk carries the bookkeeping keys and the declared columns.
+
+    Both halves matter and neither is checked anywhere else. The reserved keys
+    are what every later stage derives from and the pipeline strips them last,
+    so a generator that omits one produces a table the linker cannot key. The
+    declared columns are what the user asked for, in the order
+    `Table.output_columns` promises. Identifiers are excluded because the
+    linker attaches those, not the generator.
+    """
+    expected = table.output_columns(with_identifiers=False)
+    for index, chunk in enumerate(chunks):
+        for key in (ENTITY_KEY, ROW_KEY):
+            if key not in chunk.columns:
+                _fail_generator(
+                    "emitted columns",
+                    f"chunk {index} is missing the bookkeeping column {key!r} that every "
+                    f"later stage derives from; it has {list(chunk.columns)}",
+                )
+        produced = [c for c in chunk.columns if not str(c).startswith(RESERVED_PREFIX)]
+        if produced != expected:
+            _fail_generator(
+                "emitted columns",
+                f"chunk {index} produced {produced}, but table {table.name!r} declares "
+                f"{expected}",
+            )
+
+
+def _check_entity_non_straddling(chunks: list[pd.DataFrame], chunk_size: int) -> None:
+    """Clause 3. Every row of an entity arrives in the same chunk.
+
+    The guarantee `RuleGenerator._entities_per_chunk` states and nothing
+    asserted until this existed. Straddling corrupts nothing derived from
+    `(seed, key, salt)`, since every value is position independent, but it
+    silently breaks any consumer that treats a chunk as self describing: a
+    running total, a first-visit flag, a within-entity sort, a chunk written
+    to its own file.
+    """
+    seen: dict[Any, int] = {}
+    for index, chunk in enumerate(chunks):
+        if ENTITY_KEY not in chunk.columns:
+            _fail_generator(
+                "entity non-straddling",
+                f"chunk {index} has no {ENTITY_KEY!r} column, so an entity's rows "
+                f"cannot be located; it has {list(chunk.columns)}",
+            )
+        for key in pd.unique(chunk[ENTITY_KEY]):
+            if key in seen and seen[key] != index:
+                _fail_generator(
+                    "entity non-straddling",
+                    f"entity {key!r} has rows in chunk {seen[key]} and again in chunk "
+                    f"{index} at chunk_size={chunk_size}; an entity's rows must not be "
+                    f"split across a chunk boundary",
+                )
+            seen[key] = index
+
+
+def _check_chunk_invariance(
+    baseline: list[pd.DataFrame], split: list[pd.DataFrame], split_chunk_size: int
+) -> None:
+    """Clause 4. The rows are the same however the stream was cut up.
+
+    Compares the concatenation, not the chunks: how many chunks a size
+    produces is exactly what `chunk_size` is allowed to change.
+    """
+    _check_same_rows(
+        "chunk invariance",
+        _collect(baseline),
+        _collect(split),
+        f"chunk_size={split_chunk_size}",
+    )
+
+
+def _check_row_count(chunks: list[pd.DataFrame], table: Table, schema: Schema) -> None:
+    """Clause 5. A fully covered PerEntity table has one row per entity."""
+    if not _row_count_is_fixed_by_config(table):
+        return
+    expected = schema.entity(table.entity).count.value
+    rows = _collect(chunks)
+    if len(rows) != expected:
+        _fail_generator(
+            "row count",
+            f"table {table.name!r} emitted {len(rows)} rows for an entity declaring "
+            f"count={expected} at coverage=1.0",
+        )
+    distinct = rows[ENTITY_KEY].nunique()
+    if distinct != expected:
+        _fail_generator(
+            "row count",
+            f"table {table.name!r} emitted {len(rows)} rows covering only {distinct} "
+            f"distinct entities, but count={expected} at coverage=1.0 means one row each",
+        )
+
+
+def _row_count_is_fixed_by_config(table: Table) -> bool:
+    """Whether config alone says how many rows this table must have.
+
+    Only `PerEntity` at full coverage does. Named rather than inlined so the
+    condition that decides whether clause 5 runs at all is something a test
+    can assert directly, instead of a silent skip nobody can see.
+    """
+    return isinstance(table.grain, PerEntity) and table.coverage.value == 1.0
+
+
+# --- stage 1's plumbing -----------------------------------------------------
+
+
+def _generator_chunks(
+    generator: Any, table: Table, schema: Schema, chunk_size: int
+) -> list[pd.DataFrame]:
+    """One emit() run's chunks, kept apart rather than concatenated.
+
+    Chunk boundaries are the subject of two of the five clauses, so they have
+    to survive collection. `_emit` above concatenates, which erases exactly
+    the evidence those clauses read.
+    """
+    ctx = RunContext(schema=schema, chunk_size=chunk_size)
+    return list(generator.emit(table, ctx))
+
+
+def _check_same_rows(
+    clause: str, expected: pd.DataFrame, actual: pd.DataFrame, what: str
+) -> None:
+    if len(expected) != len(actual):
+        _fail_generator(
+            clause, f"{what} produced {len(actual)} rows, expected {len(expected)}"
+        )
+    if list(expected.columns) != list(actual.columns):
+        _fail_generator(
+            clause,
+            f"{what} produced columns {list(actual.columns)}, expected "
+            f"{list(expected.columns)}",
+        )
+    for column in expected.columns:
+        rows = _differing_rows(expected[column], actual[column])
+        if len(rows):
+            _fail_generator(
+                clause,
+                f"{what} changed column {column!r} in {len(rows)} of {len(expected)} "
+                f"row(s), e.g. {_show(expected[column], actual[column], rows)}",
+            )
+
+
+def _fail_generator(clause: str, detail: str) -> None:
+    """Raise naming the clause first.
+
+    The clause prefix is load-bearing rather than cosmetic: a conformance
+    check can go red for a reason other than the one it is about, and the
+    prefix is what lets a test assert the failure is the property it meant to
+    provoke instead of an incidental one.
+    """
+    raise GeneratorConformanceError(f"{clause}: {detail}")

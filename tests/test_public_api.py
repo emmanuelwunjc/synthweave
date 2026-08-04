@@ -47,6 +47,7 @@ EXPECTED = (
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
     # conformance
+    "check_generator", "GeneratorConformanceError",
     "check_synthesizer", "SynthesizerConformanceError",
     # mode
     "Mode", "ModeSchema",
