@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -317,6 +318,49 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     # chunk-derived rate being refused.
     with pytest.raises(ValueError, match=r"survey\.amount\.missing must return one rate per row"):
         sw.Pipeline(schema, chunk_size=7, noiser=aggregate).run()
+
+
+def test_a_chunk_derived_rate_of_the_right_length_is_refused(people):
+    """The shape of a rate says nothing about where its value came from.
+
+    The guard above catches an aggregate rate only because a bare
+    `float(...)` is a scalar. Broadcast it back to one value per row and the
+    same aggregate sails through: the shape is `(len(chunk),)`, every row
+    still gets its own entry, and the entry is still the mean of whichever
+    rows happened to share its chunk. So the rate a row receives depends on
+    `chunk_size`, which is exactly the breakage the shape check was added to
+    stop, and exactly the breakage recorded as I3 (chunk size changed the
+    output) invalidating the core scaling claim.
+
+    Inspecting the returned array cannot tell the two apart. Only behaviour
+    can: hand the rate function the same rows split two different ways and
+    see whether a row's rate moved. That is what `sw.check_rule` already does
+    for a chunk-dependent `Rule` (#79), applied here to a rate function.
+
+    Asserted twice on purpose. First that the length guard genuinely passes
+    this function, so the test cannot go green on #101's error message
+    instead; then that the run is refused for chunk dependence by name.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+
+    def chunk_derived(frame):
+        return np.full(len(frame), float((frame["education"] == "HS").mean()))
+
+    sample = pd.DataFrame({"education": ["HS", "College", "HS", "College"]})
+    assert np.asarray(chunk_derived(sample)).shape == (len(sample),), (
+        "the function under test no longer passes the one-rate-per-row check, "
+        "so this test would prove nothing about chunk dependence"
+    )
+
+    noiser = sw.Noise({"survey": {"amount": [sw.Missing(chunk_derived)]}})
+    with pytest.raises(ValueError, match=r"depends on which rows shared its chunk"):
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
 
 
 def test_a_rate_function_returning_the_wrong_length_fails_loudly(people):

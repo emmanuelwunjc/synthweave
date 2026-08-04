@@ -949,6 +949,16 @@ MUTATIONS = [
         '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
         '    current = _git("describe", "--tags", "--exact-match").strip()',
     ),
+    # #101's shape check passes a chunk-derived rate that was broadcast back to
+    # one value per row, so without the behavioural split every row silently
+    # gets the mean of whichever rows shared its chunk and the output depends
+    # on chunk_size.
+    (
+        "#126 a chunk-derived noise rate is refused, not just a misshapen one",
+        "src/synthweave/stages/noise.py",
+        "    _check_row_wise(fn, chunk, rates, path)\n",
+        "",
+    ),
 ]
 
 

@@ -409,6 +409,15 @@ returns an array. The corruption decision still routes through
 and never draws — which is what keeps a per-row rate exactly as
 deterministic and chunk invariant as a flat one. A rate outside `[0, 1]`
 raises, naming the column and op.
+
+The function must compute each row's rate from that row's own values. It is
+handed one chunk at a time, so a rate derived from the chunk as a whole
+(`f["x"].mean()`, `len(f)`, a row's position in the chunk) would change when
+`chunk_size` changes, which is meant to be a memory knob and nothing else.
+That is checked, not merely asked for: every chunk is also passed to the
+function split in two, and a rate that moves when the split moves raises,
+naming the column, the op, and the first row whose rate changed.
+
 - `sw.Typo(rate)` — one nearby-key typo in `rate` share of values.
 - `sw.OCR(rate)` — one visually-confusable-character swap in `rate` share of values.
 
