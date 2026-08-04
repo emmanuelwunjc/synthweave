@@ -867,22 +867,102 @@ def test_typos_leave_missing_values_alone(many_people):
     assert not any("None" in v for v in written)
 
 
-def test_typo_corrupts_non_ascii_values_without_breaking(people):
-    """Character indexing must be by character, not by byte."""
+NON_ASCII_NAMES = ["北京市", "Ünüver", "Ωμέγα"]
+
+
+def _typo_pairs(rate: float = 0.5) -> list[tuple[str, str]]:
+    """(original, corrupted) for every row of a non-ASCII column.
+
+    The clean run is the oracle. Noise changes values and nothing else, so the
+    two runs line up row for row, which is what makes "this value was changed,
+    and here is what it was" answerable at all. Asserting on the noised column
+    alone can only ask whether some value somewhere differs from the declared
+    set, which is the weakness this replaces.
+    """
     entity = sw.Entity(
         "person",
         count=200,
-        attributes={"name": sw.Choice(["北京市", "Ünüver", "Ωμέγα"], [0.34, 0.33, 0.33])},
+        attributes={"name": sw.Choice(NON_ASCII_NAMES, [0.34, 0.33, 0.33])},
         identifiers=[sw.Identifier("tax_id")],
     )
     table = sw.Table("t", grain=sw.PerEntity("person"), carry=["name"])
-    result = sw.Pipeline(
-        sw.Schema(entities=[entity], tables=[table], seed=1),
-        noiser=sw.Noise({"t": {"name": [sw.Typo(0.5)]}}),
-    ).run()["t"]
+    schema = sw.Schema(entities=[entity], tables=[table], seed=1)
+    clean = sw.Pipeline(schema).run()["t"]["name"]
+    dirty = sw.Pipeline(schema, noiser=sw.Noise({"t": {"name": [sw.Typo(rate)]}})).run()["t"]["name"]
+    assert dirty.notna().all()
+    return list(zip(clean, dirty))
 
-    assert result["name"].notna().all()
-    assert (~result["name"].isin(["北京市", "Ünüver", "Ωμέγα"])).any()
+
+def _corrupted_share(pairs: list[tuple[str, str]], value: str) -> float:
+    rows = [(c, d) for c, d in pairs if c == value]
+    assert rows, f"no row held {value!r}, so nothing about it was tested"
+    return sum(c != d for c, d in rows) / len(rows)
+
+
+def test_typo_corrupts_non_ascii_values_without_breaking():
+    """Character indexing must be by character, not by byte.
+
+    Two separate claims, and the old assertion (`(~isin(names)).any()`) made
+    neither. A single changed row out of 400 satisfied it, and it could not
+    look at *how* a value changed, only that it was no longer one of three
+    literals -- which is exactly what mojibake also looks like.
+
+    So: a value is corrupted at a real rate, and a corrupted value is still
+    the same string with one character swapped. `Typo` documents itself as
+    replacing one character with a keyboard neighbour, so the character count
+    must survive and exactly one position may differ. Byte-oriented handling
+    breaks both: slicing or re-decoding a multi-byte character changes the
+    length and scrambles the characters around it.
+
+    `Ünüver` is the value used here because it is the only one this can
+    currently assert a corruption rate for. That is #81, not a property of
+    the test: `Typo` cannot corrupt a value with no Latin characters at all,
+    which `test_typo_corrupts_a_value_with_no_latin_characters` pins.
+    """
+    pairs = _typo_pairs()
+
+    changed = [(c, d) for c, d in pairs if c != d]
+    for original, corrupted in changed:
+        assert len(corrupted) == len(original), (
+            f"{original!r} became {corrupted!r}: {len(original)} characters became "
+            f"{len(corrupted)}, so it was sliced by byte rather than by character"
+        )
+        differing = [i for i, (a, b) in enumerate(zip(original, corrupted)) if a != b]
+        assert len(differing) == 1, (
+            f"{original!r} became {corrupted!r}: {len(differing)} characters differ, "
+            f"and a typo replaces exactly one"
+        )
+
+    # ~0.4 in practice: half the rows are eligible and two of `Ünüver`'s six
+    # characters have no keyboard neighbour. The bound only has to be well
+    # above "one row of 200 happened to change".
+    assert _corrupted_share(pairs, "Ünüver") > 0.2, (
+        f"only {_corrupted_share(pairs, 'Ünüver'):.1%} of 'Ünüver' rows were corrupted"
+    )
+
+
+@pytest.mark.xfail(
+    reason="#81: Typo picks one position uniformly, then finds no keyboard neighbour "
+    "for it, so a value with no Latin characters is never corrupted at all",
+    strict=False,
+)
+def test_typo_corrupts_a_value_with_no_latin_characters():
+    """The half of the claim above that `Ünüver` cannot make.
+
+    `Ünüver` still contains `n`, `v`, `e` and `r`, so a `Typo` that had lost
+    every trace of non-Latin handling would go on corrupting it and the test
+    above would stay green. A value made entirely of CJK or Greek characters
+    is the one that cannot be corrupted by accident.
+
+    Written against the behaviour `Typo` claims rather than against today's
+    output, so it turns from xfail to xpass when #81 is fixed. Delete the
+    marker then.
+    """
+    pairs = _typo_pairs()
+    for value in ("北京市", "Ωμέγα"):
+        assert _corrupted_share(pairs, value) > 0.2, (
+            f"{_corrupted_share(pairs, value):.1%} of {value!r} rows were corrupted"
+        )
 
 
 def test_sequential_derives_a_column_from_another(people):
