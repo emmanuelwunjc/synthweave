@@ -538,6 +538,18 @@ MUTATIONS = [
         "",
     ),
     (
+        "N2 a stray attribute kwarg in scope mode is named, not a bare TypeError",
+        "src/synthweave/mode.py",
+        """        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: scope mode takes only variable and "
+                f"epsilon, got {sorted(kwargs)}; the column's distribution "
+                "comes from the fetched ACS rows, not from a declared rule"
+            )
+""",
+        "",
+    ),
+    (
         "#87 mode noise resolves against the schema's expanded carry (carry=*)",
         "src/synthweave/mode.py",
         "            for column_name in list(table.carry) + list(table.columns):",
@@ -763,6 +775,12 @@ MUTATIONS = [
         "src/synthweave/pipeline.py",
         "            columns=columns,\n        )",
         "            columns=sorted(columns),\n        )",
+    ),
+    (
+        "#142 check_synthesizer names the dropped row key instead of raising KeyError",
+        "src/synthweave/conformance.py",
+        "    if ROW_KEY not in got.columns:",
+        "    if False:",
     ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a

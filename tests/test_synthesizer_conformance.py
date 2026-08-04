@@ -52,6 +52,16 @@ class RowDropper(KeyedSynth):
             yield chunk.iloc[::2]
 
 
+class RowKeyDropper(KeyedSynth):
+    """Strips the reserved row key. It reads as internal bookkeeping, so this
+    is an easy mistake, and the harness has to name it rather than let a bare
+    `KeyError` out of its own internals."""
+
+    def run(self, chunks, table, ctx):
+        for chunk in super().run(chunks, table, ctx):
+            yield chunk.drop(columns=["_sw_row"])
+
+
 class RowShuffler(KeyedSynth):
     """Keeps every row but hands them back in a different order. The row
     count alone cannot see this, which is why the check reads the row key."""
@@ -79,6 +89,16 @@ def test_a_conforming_synthesizer_passes(careers):
 def test_a_row_dropping_synthesizer_is_rejected(careers):
     with pytest.raises(sw.SynthesizerConformanceError, match="rows"):
         sw.check_synthesizer(RowDropper(), careers)
+
+
+def test_a_synthesizer_dropping_the_row_key_is_rejected(careers):
+    """The failure mode this replaces: `_check_rows_survive` indexed
+    `got[ROW_KEY]` unguarded, so this candidate escaped as a bare
+    `KeyError: '_sw_row'` raised from inside the harness. A plugin author got
+    the column name and nothing about which guarantee they had broken.
+    """
+    with pytest.raises(sw.SynthesizerConformanceError, match="reserved row key"):
+        sw.check_synthesizer(RowKeyDropper(), careers)
 
 
 def test_a_row_reordering_synthesizer_is_rejected(careers):
