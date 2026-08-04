@@ -112,6 +112,18 @@ def _check_rows_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
             f"row(s) and returned {len(got)}. A synthesizer changes values in the rows it "
             "is handed; adding or dropping rows is the generator's job, not stage 2's."
         )
+    if ROW_KEY not in got.columns:
+        # Guarded rather than left to `got[ROW_KEY]`, which raises a bare
+        # KeyError naming the column and nothing else. Dropping this column is
+        # an easy mistake (it reads as internal bookkeeping), and a function
+        # whose whole job is to name the broken guarantee should not be the one
+        # that fails to.
+        raise SynthesizerConformanceError(
+            f"the synthesizer dropped {ROW_KEY!r}, the reserved row key. It is not "
+            "internal bookkeeping to strip: every downstream stage keys on it, and "
+            "the pipeline cannot line the synthesized values back up without it. "
+            "Pass it through untouched."
+        )
     before = given[ROW_KEY].tolist()
     after = got[ROW_KEY].tolist()
     if before != after:
