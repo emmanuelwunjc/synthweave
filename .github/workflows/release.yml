@@ -70,6 +70,16 @@ jobs:
           python -m pip install --upgrade twine
           python -m twine check dist/*
 
+      # GitHub's own `generate_release_notes` emits a flat list of
+      # squash-merged PR titles. The titles are typed, but nothing groups
+      # them, so a reader cannot separate a feature from a CI tweak without
+      # reading all of them. Label-based categorisation (.github/release.yml)
+      # is not the fix here: no merged PR in this repo carries a label, so
+      # every entry would land in the catch-all. The titles are the only
+      # structured signal that exists, so the sections come from those.
+      - name: Generate the release notes
+        run: python tools/release_notes.py > "$RUNNER_TEMP/release-notes.md"
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
@@ -77,7 +87,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
-          # Notes come from squash-merged PR titles since the previous tag.
-          # The repo uses Conventional Commits, so these read as a changelog
-          # without anyone maintaining one by hand.
-          generate_release_notes: true
+          # Notes come from squash-merged PR titles since the previous tag,
+          # grouped by Conventional Commit type. The repo uses Conventional
+          # Commits, so these read as a changelog without anyone maintaining
+          # one by hand. See tools/release_notes.py.
+          body_path: ${{ runner.temp }}/release-notes.md
