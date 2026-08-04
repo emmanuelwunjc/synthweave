@@ -538,6 +538,18 @@ MUTATIONS = [
         "",
     ),
     (
+        "N2 a stray attribute kwarg in scope mode is named, not a bare TypeError",
+        "src/synthweave/mode.py",
+        """        if kwargs:
+            raise ValueError(
+                f"attribute {name!r}: scope mode takes only variable and "
+                f"epsilon, got {sorted(kwargs)}; the column's distribution "
+                "comes from the fetched ACS rows, not from a declared rule"
+            )
+""",
+        "",
+    ),
+    (
         "#87 mode noise resolves against the schema's expanded carry (carry=*)",
         "src/synthweave/mode.py",
         "            for column_name in list(table.carry) + list(table.columns):",
