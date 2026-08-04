@@ -35,12 +35,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # category where a near-miss filename is worth catching directly.
 _SECRET_FILENAME = re.compile(r"(^|/)\.env($|\.)")
 
-# Where synthetic data is expected. This package's whole job is generating
-# fake SSNs, names, emails and phone numbers, so those shapes under these
-# roots are the product working, not a leak. Flagging them would make the
-# guard noise, and a noisy guard gets removed.
-_SYNTHETIC_ROOTS = ("src/", "tests/", "examples/")
-
 # Extensions worth reading. Real data hides in text; a .png or a .parquet is
 # not something this check can read usefully anyway.
 _SCANNED_SUFFIXES = {
@@ -50,7 +44,19 @@ _SCANNED_SUFFIXES = {
 
 _SUPPRESSION = re.compile(r"leak-guard:\s*allow")
 
-# Shapes that mean real people. Suppressed under _SYNTHETIC_ROOTS.
+# Shapes that mean real people.
+#
+# These used to be suppressed wholesale under src/, tests/ and examples/, on
+# the reasoning that the package generates fake SSNs, names, emails and phone
+# numbers, so it would fire constantly. Measured against every tracked file
+# with the suppression off, it does not: the whole tree yields eight findings,
+# all of them this guard's own fixtures in tests/test_leak_guard.py, and none
+# anywhere else. The package generates those values at runtime; it does not
+# write them down. So the exemption bought eight annotations' worth of quiet
+# and paid for it by blinding the guard across the three largest directories
+# in the repo, which is where a fixture holding a real person would land
+# (issue #154). The per-line `leak-guard: allow` escape hatch covers the
+# genuine literal, and makes writing one down a deliberate act.
 _PERSONAL_PATTERNS = (
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("email address", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
@@ -179,9 +185,7 @@ def pii_findings(path: str, text: str) -> list:
     """(line number, what matched, the line) for each PII shape in `text`."""
     if pathlib.PurePosixPath(path).suffix not in _SCANNED_SUFFIXES:
         return []
-    patterns = _UNIVERSAL_PATTERNS
-    if not path.startswith(_SYNTHETIC_ROOTS):
-        patterns = patterns + _PERSONAL_PATTERNS
+    patterns = _UNIVERSAL_PATTERNS + _PERSONAL_PATTERNS
     findings = []
     for number, line in enumerate(text.splitlines(), start=1):
         if _SUPPRESSION.search(line):

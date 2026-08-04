@@ -708,6 +708,36 @@ MUTATIONS = [
         'pii = ["Faker>=20,<41"]',
         'pii = ["Faker>=20,<42"]',
     ),
+    # Reverting either of these puts the leak guard back exactly as PR #106
+    # merged it, which is the state where `aws_secret_access_key=...` and a
+    # real person in a tests/ fixture both pass clean. The failure they cause
+    # is invisible and permanent -- a credential in public git history, with
+    # pre-commit printing `Passed` -- so the tests that catch them are worth
+    # pinning here.
+    (
+        "#153 a bare KEY is a credential stem, so `census_key=` is a credential",
+        "tools/check_no_private_leak.py",
+        r'    r"(?:KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
+        r'    r"(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
+    ),
+    (
+        "#153 name parts after the stem, so `secret_key_base=` is a credential",
+        "tools/check_no_private_leak.py",
+        r'    r"(?:_[A-Z0-9]+)*\b"',
+        r'    r"\b"',
+    ),
+    (
+        "#153 a 12-character value with a digit is credential-shaped",
+        "tools/check_no_private_leak.py",
+        r"[A-Za-z0-9_\-]{12,}|",
+        r"[A-Za-z0-9_\-]{20,}|",
+    ),
+    (
+        "#154 src/, tests/ and examples/ are not exempt from the personal shapes",
+        "tools/check_no_private_leak.py",
+        "    patterns = _UNIVERSAL_PATTERNS + _PERSONAL_PATTERNS",
+        "    patterns = _UNIVERSAL_PATTERNS",
+    ),
 ]
 
 

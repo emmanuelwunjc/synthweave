@@ -104,9 +104,9 @@ def test_private_paths_come_from_gitignore_not_a_hardcoded_list():
 @pytest.mark.parametrize(
     "line",
     [
-        "subject ssn is 123-45-6789 per the intake form",
-        "contact: jane.doe@example.org",
-        "call 415-555-0142 to confirm",
+        "subject ssn is 123-45-6789 per the intake form",  # leak-guard: allow (this guard's own SSN fixture)
+        "contact: jane.doe@example.org",  # leak-guard: allow (example.org is the reserved documentation domain)
+        "call 415-555-0142 to confirm",  # leak-guard: allow (555-01xx is the reserved fictional range)
         "CENSUS_API_KEY=0123456789abcdef0123456789abcdef01234567",  # leak-guard: allow (fixture)
         "loaded from /Users/yw1084/code/synthweave/private.csv",  # leak-guard: allow (fixture)
     ],
@@ -138,29 +138,40 @@ def test_compound_credential_names_are_caught(line):
 
 
 def test_findings_report_the_line_number():
-    findings = guard.pii_findings("notes.md", "clean\nssn 123-45-6789\n")
+    findings = guard.pii_findings("notes.md", "clean\nssn 123-45-6789\n")  # leak-guard: allow (this guard's own SSN fixture)
     assert findings and findings[0][0] == 2
 
 
 # --- the false positives that would get the guard turned off -------------
 
 
-def test_synthetic_fixtures_in_the_package_are_not_flagged():
-    """This repo generates fake SSNs, names and emails on purpose
-    (src/synthweave/stages, tests/test_faker_names.py, and issue I28 is
-    literally about SSN area codes). Flagging those makes the guard noise,
-    and a noisy guard gets disabled, which protects nothing.
+@pytest.mark.parametrize(
+    "path",
+    ["tests/test_intake.py", "src/synthweave/stages/identity.py",
+     "examples/three_modes.py"],
+)
+def test_a_real_person_in_the_package_is_caught(path):
+    """src/, tests/ and examples/ were blanket-exempted from the SSN, email and
+    phone shapes because "the package generates these, so it would fire
+    constantly". Measured across every tracked file it does not: the tree
+    yields eight findings, all this file's own fixtures. The exemption bought
+    that much quiet and blinded the guard across the three largest directories,
+    so it is gone (issue #154). The package generates these values at runtime;
+    a literal one written into a file is a person, and is now caught.
     """
-    body = 'SSN_FORMAT = "123-45-6789"\nemail = "a.person@example.com"\nphone = "415-555-0142"\n'
-    for path in ("src/synthweave/stages/identity.py", "tests/test_faker_names.py",
-                 "examples/three_modes.py"):
-        assert guard.pii_findings(path, body) == []
+    body = (
+        'CONTACT = "marcus.delacroix@realmail.example"\n'  # leak-guard: allow (the invented person this test exists to catch)
+        'SSN = "078-05-1120"\n'  # leak-guard: allow (078-05-1120 is the void Woolworth wallet SSN, issued to nobody)
+        'PHONE = "415-555-0142"\n'  # leak-guard: allow (555-01xx is the reserved fictional range)
+    )
+    assert {label for _, label, _ in guard.pii_findings(path, body)} == {
+        "SSN", "email address", "phone number"
+    }
 
 
 def test_secrets_are_still_caught_inside_the_package():
-    """Synthetic *data* is expected under src/, tests/ and examples/. A real
-    credential or a personal absolute path never is, so those two shapes are
-    not suppressed there."""
+    """A credential or a personal absolute path is never legitimate anywhere,
+    including under src/ and tests/."""
     assert guard.pii_findings("src/synthweave/connectors/acs_pums.py",
                               "CENSUS_API_KEY=0123456789abcdef0123456789abcdef01234567")  # leak-guard: allow (fixture)
     assert guard.pii_findings("tests/test_acs_pums.py", "path = '/Users/someone/data'")  # leak-guard: allow (fixture)
@@ -231,7 +242,7 @@ def test_no_git_binary_reports_a_usable_message_not_a_traceback(capsys, monkeypa
 
 
 def test_binary_and_unscanned_file_types_are_skipped():
-    assert guard.pii_findings("assets/logo.png", "123-45-6789") == []
+    assert guard.pii_findings("assets/logo.png", "123-45-6789") == []  # leak-guard: allow (this guard's own SSN fixture)
 
 
 # --- the whole point: the current tree must be quiet ---------------------
