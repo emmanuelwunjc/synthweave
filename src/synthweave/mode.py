@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from .pipeline import Pipeline, PipelineResult
+from .provenance import user
 from .rules import Choice, Normal, Rule, Uniform, _BaseRule
 from .schema import Entity, Schema, Table
 from .stages.noise import Missing, Noise, NoiseOp, OCR, Typo
@@ -485,6 +486,7 @@ def _epsilon_chain(
                     frame,
                     tables=[table_name],
                     predictors=list(conditioned),
+                    label=_group_label(epsilon),
                     **_cart_knobs(epsilon),
                 )
             )
@@ -526,11 +528,29 @@ def _cart_knobs(epsilon: float) -> dict[str, Any]:
     ceiling is 5, since `100 / 5` is already 20.
     """
     capped = min(max(epsilon, 0.01), 5.0)
+    # Tagged as user-provided, not left a plain int. `CARTSynthesizer` reads a
+    # plain int leaf size as its own library default, so an epsilon-derived one
+    # arrived in `unjustified()` as an undefended magic number -- the one value
+    # in the run that traces straight back to something the user chose (#145).
     return {
         "max_depth": None if capped >= 5.0 else max(1, round(capped * 4)),
-        "min_samples_leaf": max(5, round(100 / capped)),
+        "min_samples_leaf": user(
+            max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
+        ),
         "fit_cap": max(1_000, round(DEFAULT_FIT_CAP * capped / 5.0)),
     }
+
+
+def _group_label(epsilon: float) -> str:
+    """The provenance/report label one epsilon group's synthesizer runs under.
+
+    Several of them reach the same table, and everything `CARTSynthesizer.run`
+    records keys on the table name, so without a label each group overwrote the
+    last and the audit trail showed one generalization level where two were
+    applied (#145). The epsilon is the label because it is what distinguishes
+    the groups, and it is what a reader of the record needs to see.
+    """
+    return f"eps{epsilon:g}"
 
 
 class _ChainedSynthesizer:

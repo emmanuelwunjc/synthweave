@@ -18,6 +18,7 @@ import pytest
 import invariants
 import synthweave as sw
 from synthweave.mode import _cart_knobs
+from synthweave.provenance import unwrap
 
 
 # --- construction -------------------------------------------------------
@@ -223,8 +224,18 @@ def test_real_datas_docstring_disclaims_differential_privacy():
 # produces. These pin both halves so neither can drift alone.
 
 
+def _knob_values(epsilon: float) -> dict:
+    """The knobs with their provenance tags stripped.
+
+    `min_samples_leaf` comes back `Tagged` so the epsilon a user set is not
+    recorded as a library default (#145), and these two tests are about the
+    numbers rather than about the tag.
+    """
+    return {key: unwrap(value) for key, value in _cart_knobs(epsilon).items()}
+
+
 def test_cart_knobs_at_the_epsilon_ceiling_are_pinned():
-    assert _cart_knobs(5.0) == {
+    assert _knob_values(5.0) == {
         "max_depth": None,
         "min_samples_leaf": 20,
         "fit_cap": 200_000,
@@ -232,7 +243,7 @@ def test_cart_knobs_at_the_epsilon_ceiling_are_pinned():
 
 
 def test_epsilon_past_the_ceiling_produces_the_ceiling_knobs():
-    assert _cart_knobs(10.0) == _cart_knobs(5.0)
+    assert _knob_values(10.0) == _knob_values(5.0)
 
 
 def test_cart_knobs_docstring_names_the_values_it_actually_produces():
@@ -638,3 +649,60 @@ def test_binding_a_real_data_attribute_under_another_name_raises_naming_both(
 
     with pytest.raises(ValueError, match="salary.*wage|wage.*salary"):
         m.schema(entities=[person], tables=[table], seed=1).run()
+
+
+# --- sw.Mode.real_data(): the audit trail a chained run leaves ------------
+
+
+def _two_epsilon_result(donor_frame):
+    m = sw.Mode.real_data(source=donor_frame, epsilon=0.5)
+    education = m.attribute("education")
+    wage = m.attribute("wage", epsilon=4.0)
+    person = m.entity(
+        "person", count=200, attributes={"education": education, "wage": wage}
+    )
+    table = m.table("roster", grain="person", carry=["education", "wage"])
+    return m.schema(entities=[person], tables=[table], seed=3).run()
+
+
+def test_a_two_epsilon_run_records_both_generalization_levels(donor_frame):
+    """#145: every group wrote the same provenance path, so one survived.
+
+    epsilon 0.5 asks for leaves of 100/0.5 = 200 rows and epsilon 4.0 for
+    100/4 = 25, per `_cart_knobs`. Both were applied to the output, so both
+    have to appear: a user defending this table needs to see that two
+    different generalization levels were used, not one.
+    """
+    result = _two_epsilon_result(donor_frame)
+
+    leaves = {
+        tagged.value
+        for path, tagged in result.provenance.entries.items()
+        if path.endswith("min_samples_leaf")
+    }
+    assert leaves == {200, 25}
+
+
+def test_a_two_epsilon_run_reports_both_fits_without_colliding(donor_frame):
+    """#145: `ctx.report` keyed on the table and the stage name alone."""
+    result = _two_epsilon_result(donor_frame)
+
+    reports = [
+        facts
+        for stage, facts in result.metadata["roster"].items()
+        if stage.startswith("synthesize")
+    ]
+    assert len(reports) == 2
+    assert {tuple(facts["columns"]) for facts in reports} == {("education",), ("wage",)}
+
+
+def test_an_epsilon_derived_leaf_size_is_not_reported_as_a_library_default(donor_frame):
+    """#145: the one number with a stated justification was the one flagged.
+
+    `CARTSynthesizer` tags any plain int leaf size as a library default, and
+    the epsilon-derived one arrived as a plain int, so `unjustified()` named
+    the value the user chose by setting `epsilon=`.
+    """
+    result = _two_epsilon_result(donor_frame)
+
+    assert not [path for path in result.unjustified() if "min_samples_leaf" in path]

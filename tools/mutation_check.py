@@ -717,15 +717,8 @@ MUTATIONS = [
     (
         "#144 a real column is scoped to the tables that declared it",
         "src/synthweave/mode.py",
-        """                    here,
-                    frame,
-                    tables=[table_name],
-                    predictors=list(conditioned),
-                    **_cart_knobs(epsilon),""",
-        """                    here,
-                    frame,
-                    predictors=list(conditioned),
-                    **_cart_knobs(epsilon),""",
+        "                    tables=[table_name],\n",
+        "",
     ),
     (
         "#144 a real attribute no table carries raises instead of reaching all of them",
@@ -742,6 +735,22 @@ MUTATIONS = [
         "src/synthweave/mode.py",
         "        if isinstance(rule, _RealDataColumn) and rule.name != bound:",
         "        if False:",
+    ),
+    (
+        "#145 each epsilon group records under its own provenance/report key",
+        "src/synthweave/stages/synthesize.py",
+        '        prefix = f"{table.name}.synth" + (f".{self.label}" if self.label else "")\n'
+        '        stage = "synthesize" + (f".{self.label}" if self.label else "")',
+        '        prefix = f"{table.name}.synth"\n'
+        '        stage = "synthesize"',
+    ),
+    (
+        "#145 an epsilon-derived leaf size is user-provided, not a library default",
+        "src/synthweave/mode.py",
+        """        "min_samples_leaf": user(
+            max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
+        ),""",
+        '        "min_samples_leaf": max(5, round(100 / capped)),',
     ),
 ]
 
