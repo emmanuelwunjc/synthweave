@@ -79,11 +79,11 @@ print(result["roster"].head(4))
 ```
 
 ```text
-    tax_id education  birth_year
-9509912293        HS        1983
-7347177053        HS        1990
-0931814884        HS        1969
-2374398424   College        1963
+       tax_id education  birth_year
+0  9509912293        HS        1983
+1  7347177053        HS        1990
+2  0931814884        HS        1969
+3  2374398424   College        1963
 ```
 
 Ten thousand rows. No data file, no API key, no setup beyond `pip install`.
