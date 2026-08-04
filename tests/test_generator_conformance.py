@@ -1,45 +1,21 @@
-"""Conformance suite for stage 1: every registered `Generator`, checked.
+"""`sw.check_generator`: the conformance harness for a custom `Generator`.
 
 `Generator` is a `runtime_checkable` Protocol matched on `emit` alone, so
-anything with the right method name is accepted as a generator. Everything the
-rest of the pipeline relies on is stated in prose and checked nowhere. This
-file turns each of those statements into an assertion and runs it against
-every implementation in `sw.available("generator")`.
+nothing stops a plugin author from writing one that reaches for random state,
+drops a bookkeeping column, invents a column, omits part of the population, or
+cuts the stream by rows instead of by entities. These tests are the harness's
+own proof that it catches each of those, one deliberately non-conforming
+generator per clause.
 
-The five clauses, each with the sentence it comes from:
+Every non-conforming class below delegates to the built-in generator and then
+breaks exactly one clause, so a failure it triggers cannot be blamed on
+anything else about it. Each test asserts on the clause name the failure
+carries, not merely that something went red: a conformance check that goes red
+incidentally looks exactly like one that works.
 
-1. determinism      CONTRIBUTING.md: "Determinism. Same schema and seed
-                    produce identical output, always."
-2. chunk invariance docs/GUIDE.md on `chunk_size`: "A memory setting only --
-                    it never changes the output."
-3. entity non-straddling
-                    `RuleGenerator._entities_per_chunk`: "Chunking happens
-                    over entities rather than rows so that an entity's rows
-                    never straddle a boundary."
-4. emitted columns  pipeline.py `_strip_reserved`: the bookkeeping columns
-                    "never reach the user but every stage can rely on them
-                    being present", and `Table.output_columns` is "the columns
-                    this table produces, in the order a run emits them".
-5. row count        `Entity.count` is the population, so a table at
-                    `coverage=1.0` on `PerEntity` grain has one row per
-                    entity and no more.
-
-Clause 3 is the one nothing asserted before. It is also the only clause a
-generator can break while every other clause still holds, which is why it
-needs its own check rather than being assumed to fall out of the others.
-
-Internal, not public, on purpose. `sw.check_rule` is public because a plugin
-author writes `Rule` implementations constantly and needs a one-liner they can
-call on their own object. A generator is rarer, and checking one needs a whole
-`Schema` and a table name rather than a bare object, so the public one-liner
-does not exist to be written. The frozen surface in `tests/test_public_api.py`
-grows only when a user would reach for the name; nobody has asked for this
-one. If a generator plugin ecosystem appears, promoting the `check_*`
-functions below into `synthweave` is a small, deliberate follow-up.
-
-Every check below is proved to have teeth by a deliberately non-conforming
-generator further down the file. A conformance suite that nothing can fail is
-the exact failure #53 exists to prevent.
+Entity non-straddling is the clause #53 names as unasserted. It is also the
+only one a generator can break with all four others intact, which is why
+`RowChunkedGenerator` below is the most important class in this file.
 """
 
 from __future__ import annotations
@@ -49,163 +25,11 @@ import pandas as pd
 import pytest
 
 import synthweave as sw
-from synthweave.validation import ENTITY_KEY, RESERVED_PREFIX, ROW_KEY
+from synthweave.validation import ENTITY_KEY, ROW_KEY
 
-# Small enough that the whole suite is fast, large enough that 13 splits every
-# fixture into many chunks and 100_000 leaves each one whole.
+# Small enough to split every fixture into many chunks. Matches `SPLIT` in
+# tests/invariants.py, which is the size the rest of the suite chunks at.
 SPLIT = 13
-WHOLE = 100_000
-SIZES = (SPLIT, 97, WHOLE)
-
-
-class GeneratorConformanceError(AssertionError):
-    """A generator broke one of the five clauses this file checks."""
-
-
-# --- the harness ---------------------------------------------------------
-
-
-def _chunks(generator, schema: sw.Schema, table_name: str, chunk_size: int) -> list[pd.DataFrame]:
-    """One generator run's chunks, kept separate rather than concatenated.
-
-    Chunk boundaries are the subject of two of the five clauses, so they must
-    survive collection. A helper that concatenated would erase the evidence.
-    """
-    ctx = sw.RunContext(schema=schema, chunk_size=chunk_size)
-    return list(generator.emit(schema.table(table_name), ctx))
-
-
-def _rows(chunks: list[pd.DataFrame]) -> pd.DataFrame:
-    if not chunks:
-        return pd.DataFrame()
-    return pd.concat(chunks, ignore_index=True)
-
-
-def _fail(clause: str, detail: str) -> None:
-    raise GeneratorConformanceError(f"{clause}: {detail}")
-
-
-def _same_rows(clause: str, expected: pd.DataFrame, actual: pd.DataFrame, what: str) -> None:
-    if len(expected) != len(actual):
-        _fail(clause, f"{what} produced {len(actual)} rows, expected {len(expected)}")
-    if list(expected.columns) != list(actual.columns):
-        _fail(clause, f"{what} produced columns {list(actual.columns)}, expected {list(expected.columns)}")
-    try:
-        pd.testing.assert_frame_equal(actual, expected)
-    except AssertionError as exc:
-        _fail(clause, f"{what} changed a value: {exc}")
-
-
-def check_determinism(generator, schema: sw.Schema, table_name: str) -> None:
-    """Clause 1. Two runs of the same table at the same chunk size agree."""
-    first = _rows(_chunks(generator, schema, table_name, WHOLE))
-    second = _rows(_chunks(generator, schema, table_name, WHOLE))
-    _same_rows("determinism", first, second, "a second emit() of the same table")
-
-
-def check_chunk_invariance(generator, schema: sw.Schema, table_name: str) -> None:
-    """Clause 2. The rows are the same however the stream was cut up.
-
-    Compares the concatenation, not the chunks: how many chunks a size
-    produces is exactly what `chunk_size` is allowed to change.
-    """
-    reference = _rows(_chunks(generator, schema, table_name, SIZES[-1]))
-    for size in SIZES[:-1]:
-        other = _rows(_chunks(generator, schema, table_name, size))
-        _same_rows("chunk invariance", reference, other, f"chunk_size={size}")
-
-
-def check_entity_non_straddling(generator, schema: sw.Schema, table_name: str) -> None:
-    """Clause 3. Every row of an entity arrives in the same chunk.
-
-    The guarantee nothing asserted before #53. A generator that cut the stream
-    by rows instead of by entities would satisfy every other clause here and
-    still hand a consumer half an entity, which silently breaks anything that
-    derives a per-entity fact from a chunk (a running total, a first-visit
-    flag, a within-entity sort) without ever raising.
-
-    Checked at the smallest chunk size, since a size that leaves the table in
-    one chunk cannot show a boundary problem at all.
-    """
-    chunks = _chunks(generator, schema, table_name, SPLIT)
-    seen: dict[object, int] = {}
-    for index, chunk in enumerate(chunks):
-        if ENTITY_KEY not in chunk.columns:
-            _fail(
-                "entity non-straddling",
-                f"chunk {index} has no {ENTITY_KEY!r} column, so an entity's rows "
-                f"cannot be located; it has {list(chunk.columns)}",
-            )
-        for key in pd.unique(chunk[ENTITY_KEY]):
-            if key in seen and seen[key] != index:
-                _fail(
-                    "entity non-straddling",
-                    f"entity {key!r} has rows in chunk {seen[key]} and again in chunk "
-                    f"{index} at chunk_size={SPLIT}; an entity's rows must not be split "
-                    f"across a chunk boundary",
-                )
-            seen[key] = index
-
-
-def check_emitted_columns(generator, schema: sw.Schema, table_name: str) -> None:
-    """Clause 4. Each chunk carries the bookkeeping keys and the declared columns.
-
-    Both halves matter and neither is checked anywhere else. The reserved keys
-    are what every later stage derives from and the pipeline strips them last,
-    so a generator that omits one produces a table the linker cannot key. The
-    declared columns are what the user asked for, in the order `output_columns`
-    promises.
-    """
-    table = schema.table(table_name)
-    expected = table.output_columns(with_identifiers=False)
-    for index, chunk in enumerate(_chunks(generator, schema, table_name, SPLIT)):
-        for key in (ENTITY_KEY, ROW_KEY):
-            if key not in chunk.columns:
-                _fail(
-                    "emitted columns",
-                    f"chunk {index} is missing the bookkeeping column {key!r} that every "
-                    f"later stage derives from; it has {list(chunk.columns)}",
-                )
-        produced = [c for c in chunk.columns if not str(c).startswith(RESERVED_PREFIX)]
-        if produced != expected:
-            _fail(
-                "emitted columns",
-                f"chunk {index} produced {produced}, but table {table_name!r} declares "
-                f"{expected}",
-            )
-
-
-def check_row_count(generator, schema: sw.Schema, table_name: str) -> None:
-    """Clause 5. A fully covered PerEntity table has one row per entity.
-
-    Only stated for that case, because it is the only one where config alone
-    fixes the answer. `PerEvent` draws its own row count and `coverage` below
-    1.0 keeps a hash-selected subset, so neither has a number to compare to.
-    """
-    table = schema.table(table_name)
-    if not isinstance(table.grain, sw.PerEntity) or table.coverage.value != 1.0:
-        raise ValueError(
-            f"check_row_count only applies to a PerEntity table at coverage=1.0; "
-            f"{table_name!r} is {type(table.grain).__name__} at coverage={table.coverage.value}"
-        )
-    expected = schema.entity(table.entity).count.value
-    rows = _rows(_chunks(generator, schema, table_name, SPLIT))
-    if len(rows) != expected:
-        _fail(
-            "row count",
-            f"table {table_name!r} emitted {len(rows)} rows for an entity declaring "
-            f"count={expected} at coverage=1.0",
-        )
-    distinct = rows[ENTITY_KEY].nunique()
-    if distinct != expected:
-        _fail(
-            "row count",
-            f"table {table_name!r} emitted {len(rows)} rows covering only {distinct} "
-            f"distinct entities, but count={expected} at coverage=1.0 means one row each",
-        )
-
-
-# --- fixtures ------------------------------------------------------------
 
 
 @pytest.fixture
@@ -233,16 +57,16 @@ def grains(people, roster, wages, visits) -> sw.Schema:
 ALL_TABLES = ("roster", "wages", "visits")
 
 
-# --- deliberately non-conforming generators ------------------------------
+# --- deliberately non-conforming generators ---------------------------------
 
 
-def _reference(table: sw.Table, ctx: sw.RunContext) -> list[pd.DataFrame]:
-    """What the built-in generator emits, as a starting point to corrupt.
-
-    Each broken generator below delegates here and then breaks exactly one
-    clause, so a failure cannot be blamed on anything else about it.
-    """
+def _reference(table, ctx) -> list[pd.DataFrame]:
+    """What the built-in generator emits, as a starting point to corrupt."""
     return list(sw.RuleGenerator().emit(table, ctx))
+
+
+def _one_frame(chunks: list[pd.DataFrame]) -> pd.DataFrame:
+    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
 class NonDeterministicGenerator:
@@ -253,44 +77,6 @@ class NonDeterministicGenerator:
             chunk = chunk.copy()
             chunk[list(table.columns)[0]] = np.random.default_rng().random(len(chunk))
             yield chunk
-
-
-class ChunkSizeDependentGenerator:
-    """A value derived from how many rows arrived together.
-
-    Deterministic at any fixed chunk size, so clause 1 cannot see it. Only
-    comparing across chunk sizes can.
-    """
-
-    def emit(self, table, ctx):
-        for chunk in _reference(table, ctx):
-            chunk = chunk.copy()
-            chunk[list(table.columns)[0]] = float(len(chunk))
-            yield chunk
-
-
-class RowChunkedGenerator:
-    """Cuts the stream by rows instead of by entities.
-
-    The realistic version of this bug: a generator that materializes rows and
-    then slices them `chunk_size` at a time, which lands a boundary wherever
-    it falls. Every other clause still holds -- the same rows, the same
-    values, the same columns, the same count -- so this is precisely the
-    generator that a suite without clause 3 would pass.
-    """
-
-    def emit(self, table, ctx):
-        rows = _rows(_reference(table, ctx))
-        keys = rows[ENTITY_KEY].to_numpy()
-        # The first row that repeats the previous row's entity, i.e. a cut
-        # point that provably lands inside one entity rather than between two.
-        cut = next((i for i in range(1, len(keys)) if keys[i] == keys[i - 1]), None)
-        if cut is None:
-            # PerEntity grain: one row per entity, so no cut can straddle.
-            yield rows
-            return
-        yield rows.iloc[:cut].reset_index(drop=True)
-        yield rows.iloc[cut:].reset_index(drop=True)
 
 
 class NoRowKeyGenerator:
@@ -311,119 +97,167 @@ class ExtraColumnGenerator:
             yield chunk
 
 
-class TruncatingGenerator:
-    """Stops one chunk early, so part of the population never appears."""
+class RowChunkedGenerator:
+    """Cuts the stream by rows instead of by entities.
+
+    The realistic version of this bug: a generator that materializes rows and
+    then slices them `chunk_size` at a time, so a boundary lands wherever it
+    falls. Every other clause still holds -- the same rows in the same order,
+    the same values, the same columns, the same count -- which makes this
+    precisely the generator a suite without the non-straddling clause passes.
+    """
 
     def emit(self, table, ctx):
-        chunks = _reference(table, ctx)
-        yield from chunks[:-1]
+        rows = _one_frame(_reference(table, ctx))
+        keys = rows[ENTITY_KEY].to_numpy()
+        # The first row repeating the previous row's entity: a cut point that
+        # provably lands inside one entity rather than between two.
+        cut = next((i for i in range(1, len(keys)) if keys[i] == keys[i - 1]), None)
+        if cut is None:
+            # PerEntity grain: one row per entity, so no cut can straddle.
+            yield rows
+            return
+        yield rows.iloc[:cut].reset_index(drop=True)
+        yield rows.iloc[cut:].reset_index(drop=True)
+
+
+class ChunkSizeDependentGenerator:
+    """A value derived from how many rows arrived together.
+
+    Deterministic at any fixed chunk size, so the determinism clause cannot
+    see it. Only comparing across chunk sizes can.
+    """
+
+    def emit(self, table, ctx):
+        for chunk in _reference(table, ctx):
+            chunk = chunk.copy()
+            chunk[list(table.columns)[0]] = float(len(chunk))
+            yield chunk
+
+
+class OmittingGenerator:
+    """Silently leaves the last ten entities out of the population.
+
+    Omits the same entities at every chunk size, so this is invisible to the
+    other four clauses: the rows it does emit are deterministic, correctly
+    columned, chunk invariant and never straddling.
+    """
+
+    OMITTED = 10
+
+    def emit(self, table, ctx):
+        total = ctx.schema.entity(table.entity).count.value
+        gone = {f"{table.entity}:{i}" for i in range(total - self.OMITTED, total)}
+        for chunk in _reference(table, ctx):
+            kept = chunk[~chunk[ENTITY_KEY].isin(gone)]
+            if len(kept):
+                yield kept
 
 
 class DuplicatingGenerator:
-    """Emits the right number of rows for the wrong number of entities."""
+    """Emits the declared number of rows over half the declared entities."""
 
     def emit(self, table, ctx):
-        rows = _rows(_reference(table, ctx))
+        rows = _one_frame(_reference(table, ctx))
         half = len(rows) // 2
         yield pd.concat([rows.iloc[:half], rows.iloc[:half]], ignore_index=True)
 
 
-# --- the checks, proved to have teeth ------------------------------------
+# --- one non-conforming generator per clause --------------------------------
 
 
-def test_determinism_catches_a_generator_that_uses_rng_state(grains):
-    with pytest.raises(GeneratorConformanceError, match="^determinism:"):
-        check_determinism(NonDeterministicGenerator(), grains, "visits")
+def test_a_conforming_generator_passes(grains):
+    for table_name in ALL_TABLES:
+        sw.check_generator(sw.RuleGenerator(), grains, table=table_name)
 
 
-def test_chunk_invariance_catches_a_chunk_size_dependent_value(grains):
-    with pytest.raises(GeneratorConformanceError, match="^chunk invariance:"):
-        check_chunk_invariance(ChunkSizeDependentGenerator(), grains, "visits")
+def test_a_non_deterministic_generator_is_rejected(grains):
+    with pytest.raises(sw.GeneratorConformanceError, match="^determinism:"):
+        sw.check_generator(NonDeterministicGenerator(), grains, table="visits")
+
+
+def test_a_generator_dropping_a_bookkeeping_key_is_rejected(grains):
+    with pytest.raises(sw.GeneratorConformanceError, match="^emitted columns:"):
+        sw.check_generator(NoRowKeyGenerator(), grains, table="wages")
+
+
+def test_a_generator_emitting_an_undeclared_column_is_rejected(grains):
+    with pytest.raises(sw.GeneratorConformanceError, match="^emitted columns:"):
+        sw.check_generator(ExtraColumnGenerator(), grains, table="wages")
 
 
 @pytest.mark.parametrize("table_name", ("wages", "visits"))
-def test_non_straddling_catches_a_row_chunked_generator(table_name, grains):
-    """The clause #53 names. Both multi-row grains, since the bug is invisible
+def test_a_row_chunked_generator_straddles_an_entity_and_is_rejected(table_name, grains):
+    """The clause #53 names. Both multi-row grains, since the bug cannot occur
     on PerEntity and a check that only ever saw PerEntity would prove nothing."""
-    with pytest.raises(GeneratorConformanceError, match="^entity non-straddling:"):
-        check_entity_non_straddling(RowChunkedGenerator(), grains, table_name)
+    with pytest.raises(sw.GeneratorConformanceError, match="^entity non-straddling:"):
+        sw.check_generator(RowChunkedGenerator(), grains, table=table_name)
 
 
-def test_non_straddling_passes_the_same_generator_on_per_entity_grain(grains):
-    """Guards the guard: `RowChunkedGenerator` is not simply always red.
-
-    On PerEntity grain there is no cut that can split an entity, so the same
-    deliberately broken generator conforms. Without this, the test above could
-    be passing because the generator is broken in some other way.
-    """
-    check_entity_non_straddling(RowChunkedGenerator(), grains, "roster")
+def test_a_chunk_size_dependent_generator_is_rejected(grains):
+    with pytest.raises(sw.GeneratorConformanceError, match="^chunk invariance:"):
+        sw.check_generator(ChunkSizeDependentGenerator(), grains, table="visits")
 
 
-def test_emitted_columns_catches_a_missing_bookkeeping_key(grains):
-    with pytest.raises(GeneratorConformanceError, match="^emitted columns:"):
-        check_emitted_columns(NoRowKeyGenerator(), grains, "wages")
+def test_a_generator_omitting_entities_is_rejected(grains):
+    with pytest.raises(sw.GeneratorConformanceError, match="^row count:"):
+        sw.check_generator(OmittingGenerator(), grains, table="roster")
 
 
-def test_emitted_columns_catches_an_undeclared_column(grains):
-    with pytest.raises(GeneratorConformanceError, match="^emitted columns:"):
-        check_emitted_columns(ExtraColumnGenerator(), grains, "wages")
-
-
-def test_row_count_catches_a_truncated_population(grains):
-    with pytest.raises(GeneratorConformanceError, match="^row count:"):
-        check_row_count(TruncatingGenerator(), grains, "roster")
-
-
-def test_row_count_catches_the_right_total_over_the_wrong_entities(grains):
+def test_a_generator_covering_half_the_population_twice_is_rejected(grains):
     """A row total alone is not enough: half the population twice over is the
     declared count of rows and half the declared count of entities."""
-    with pytest.raises(GeneratorConformanceError, match="^row count:"):
-        check_row_count(DuplicatingGenerator(), grains, "roster")
+    with pytest.raises(sw.GeneratorConformanceError, match="^row count:"):
+        sw.check_generator(DuplicatingGenerator(), grains, table="roster")
 
 
-def test_row_count_refuses_a_table_it_cannot_judge(grains):
-    """PerEvent draws its own row count, so there is no declared number to
-    compare against. Silently passing there would be a check that cannot fail."""
-    with pytest.raises(ValueError, match="only applies to a PerEntity table"):
-        check_row_count(sw.RuleGenerator(), grains, "visits")
+# --- guards on the guards ---------------------------------------------------
 
 
-# --- every registered generator ------------------------------------------
+def test_the_row_chunked_generator_passes_on_per_entity_grain(grains):
+    """`RowChunkedGenerator` is not simply always red.
 
-GENERATORS = sorted(sw.available("generator"))
+    On PerEntity grain no cut can split an entity, so the same deliberately
+    broken generator conforms. Without this, the two failures above could be
+    coming from something else about it entirely.
+    """
+    sw.check_generator(RowChunkedGenerator(), grains, table="roster")
 
 
-@pytest.mark.parametrize("name", GENERATORS)
+def test_the_omitting_generator_passes_where_config_fixes_no_row_count(grains):
+    """The row-count clause is documented as PerEntity-at-full-coverage only,
+    and this is what that costs: the identical omission is invisible on
+    PerEvent grain, because nothing in the config says how many rows a table
+    whose grain draws its own counts should have. Asserting the gap keeps it a
+    known limit rather than a check quietly doing nothing.
+    """
+    sw.check_generator(OmittingGenerator(), grains, table="visits")
+
+
+def test_the_table_argument_may_be_omitted_for_a_single_table_schema(careers):
+    sw.check_generator(sw.RuleGenerator(), careers)
+
+
+def test_a_multi_table_schema_must_name_its_table(grains):
+    with pytest.raises(ValueError, match="pass table="):
+        sw.check_generator(sw.RuleGenerator(), grains)
+
+
+# --- over the registry ------------------------------------------------------
+
+
 @pytest.mark.parametrize("table_name", ALL_TABLES)
-def test_registered_generators_are_deterministic(name, table_name, grains):
-    check_determinism(sw.resolve("generator", name), grains, table_name)
+def test_every_registered_generator_conforms(table_name, grains):
+    """The suite covers whatever is registered, including a plugin's own.
 
+    Reading the registry rather than listing built-ins is the point: a third
+    party's generator is held to the same contract without editing library
+    code, and a built-in added later cannot drift out of coverage.
+    """
+    sw.register("generator", "conformance-test-rules")(sw.RuleGenerator())
+    names = sw.available("generator")
+    assert "conformance-test-rules" in names
+    assert len(names) > 1, f"only {names} registered; the built-in generator is missing"
 
-@pytest.mark.parametrize("name", GENERATORS)
-@pytest.mark.parametrize("table_name", ALL_TABLES)
-def test_registered_generators_are_chunk_invariant(name, table_name, grains):
-    check_chunk_invariance(sw.resolve("generator", name), grains, table_name)
-
-
-@pytest.mark.parametrize("name", GENERATORS)
-@pytest.mark.parametrize("table_name", ALL_TABLES)
-def test_registered_generators_never_straddle_an_entity(name, table_name, grains):
-    check_entity_non_straddling(sw.resolve("generator", name), grains, table_name)
-
-
-@pytest.mark.parametrize("name", GENERATORS)
-@pytest.mark.parametrize("table_name", ALL_TABLES)
-def test_registered_generators_emit_the_declared_columns(name, table_name, grains):
-    check_emitted_columns(sw.resolve("generator", name), grains, table_name)
-
-
-@pytest.mark.parametrize("name", GENERATORS)
-def test_registered_generators_emit_one_row_per_entity(name, grains):
-    check_row_count(sw.resolve("generator", name), grains, "roster")
-
-
-def test_the_registry_is_not_empty():
-    """Guards the guard: if `available("generator")` ever came back empty, every
-    parametrized test above would collect zero cases and the file would report
-    a clean pass while checking nothing."""
-    assert GENERATORS, "no generators registered; the suite above checked nothing"
+    for name in names:
+        sw.check_generator(sw.resolve("generator", name), grains, table=table_name)
