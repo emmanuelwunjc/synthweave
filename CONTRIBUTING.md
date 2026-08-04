@@ -144,7 +144,7 @@ appends to `MUTATIONS`. **Append at the end of the list, never in the
 middle**, so a conflict resolves as one mechanical hunk instead of a
 semantic merge. Merge those PRs one at a time.
 
-**`src/synthweave/__init__.py` is shared and load-bearing** — it is the
+**`src/synthweave/__init__.py` is shared and load-bearing.** It is the
 public API surface. Say so in the PR title if you touch it, and expect to
 serialise with anything else that does.
 
