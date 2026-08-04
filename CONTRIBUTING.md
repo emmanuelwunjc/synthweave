@@ -81,9 +81,9 @@ trusting it. A test that cannot fail is not coverage.
 - PRs squash-merge, so the PR title becomes the commit on `main` and appears
   verbatim in the generated release notes. Write it accordingly.
 
-Required checks: `test (3.10)`, `pre-commit`, `mutation-check`,
-`conventional`. Branch protection blocks merging until they pass, and a PR
-must be up to date with `main` first.
+Required checks: `test (3.10)`, `test-pandas3`, `pre-commit`,
+`mutation-check`, `conventional`. Branch protection blocks merging until they
+pass, and a PR must be up to date with `main` first.
 
 Never push directly to `main`. Branch protection blocks it for everyone
 except repo admins, but the rule holds regardless of who is technically able
