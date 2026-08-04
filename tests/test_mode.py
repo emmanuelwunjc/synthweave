@@ -373,6 +373,28 @@ def test_scope_rejects_a_non_positive_per_attribute_epsilon(bad):
         m.attribute("wage", variable="PINCP", epsilon=bad)
 
 
+def test_scope_rejects_an_unknown_kwarg_naming_the_attribute():
+    """docs/GUIDE.md Part 4 promises this in every mode, not two of three.
+
+    A narrow keyword-only signature answered `m.attribute("wage", min=0)`
+    with `TypeError: ScopeMode._build_rule() got an unexpected keyword
+    argument 'min'`, which names a private method instead of the attribute
+    the caller wrote. A misspelled kwarg is the case that matters: it has to
+    fail loudly and say which attribute is at fault.
+    """
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="wage"):
+        m.attribute("wage", variable="PINCP", min=0, max=1)
+
+
+def test_scope_rejects_a_misspelled_noise_rate_rather_than_dropping_it():
+    """`missing_rate=` is real in every mode, so `missng_rate=` is a typo and
+    not a keyword this mode should quietly swallow."""
+    m = sw.Mode.scope(area_code="NY")
+    with pytest.raises(ValueError, match="missng_rate"):
+        m.attribute("wage", variable="PINCP", missng_rate=0.1)
+
+
 def test_attribute_with_variable_registers_it():
     m = sw.Mode.scope(area_code="NY")
     m.attribute("wage", variable="PINCP")
