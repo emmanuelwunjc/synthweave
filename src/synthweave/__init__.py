@@ -54,6 +54,7 @@ from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _installed_version
 
 from ._hash import derive_id
+from .conformance import SynthesizerConformanceError, check_synthesizer
 from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
 from .mode import Mode, ModeSchema
@@ -104,6 +105,8 @@ __all__ = [
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
+    # conformance
+    "check_synthesizer", "SynthesizerConformanceError",
     # mode
     "Mode", "ModeSchema",
     # pipeline
