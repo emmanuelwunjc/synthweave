@@ -4,11 +4,17 @@ A fix with no test that catches its absence is not locked down. Each revert is
 applied to a throwaway copy of the checkout, the suite runs against that copy,
 and the harness reports whether the suite noticed.
 
-Two properties are load-bearing and neither is traded for speed:
+Three properties are load-bearing and none is traded for speed:
 
 - MISSED: a reverted fix that no test catches fails the run.
 - STALE: an entry whose file or snippet no longer matches verified nothing, so
   it fails the run too.
+- INCONCLUSIVE: a suite run that never finished verified nothing either, so it
+  is neither a pass nor a catch, and it fails the run as well.
+
+The last one is the direction this harness must never fail in. "I could not
+tell" resolving to "covered" is worse than a crash, because a crash gets
+noticed.
 
 Every mutation is independent, so they run concurrently, one sandbox per
 worker. Sandboxing is what makes that safe: the real working tree is never
@@ -43,6 +49,26 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # self-skips without a git checkout, so it runs against the real tree but not
 # inside a sandbox. It guards a docs index, not any entry in MUTATIONS.
 SANDBOX_SKIP = (".git", "__pycache__", ".pytest_cache")
+
+# Wall-clock bound on one suite run. A run that hits it is inconclusive, never
+# a pass and never a catch.
+SUITE_TIMEOUT = 300
+
+# How a suite run ended. Three outcomes, not two: "ran and went red" and "never
+# finished" used to share one `False`, which made a timed-out run indexed as
+# proof that a revert was caught.
+PASSED, FAILED, DID_NOT_FINISH = "passed", "failed", "did not finish"
+
+# Verdicts. CAUGHT is the only one that counts as coverage; the rest fail the
+# run, each for its own reason.
+CAUGHT, MISSED, STALE, INCONCLUSIVE = "CAUGHT", "MISSED", "STALE", "INCONCLUSIVE"
+
+# Printed above the names when a verdict fails the run.
+FAILURE_HEADLINE = {
+    STALE: "mutation(s) no longer match the code and verified nothing:",
+    MISSED: "fix(es) with NO regression coverage:",
+    INCONCLUSIVE: "mutation(s) whose suite run never finished, so nothing was verified:",
+}
 
 # (issue, file, original_snippet, reverted_snippet)
 MUTATIONS = [
@@ -743,7 +769,8 @@ MUTATIONS = [
 ]
 
 
-def run_suite(cwd: pathlib.Path) -> tuple[bool, str, str]:
+def run_suite(cwd: pathlib.Path) -> tuple[str, str, str]:
+    """Run the suite in `cwd`. Returns (outcome, summary line, full output)."""
     # Inherit the real environment and override only PYTHONPATH. Replacing it
     # outright used to work on a dev machine and fail on a CI runner, where
     # the interpreter lives outside a hardcoded PATH and the suite needs
@@ -762,13 +789,16 @@ def run_suite(cwd: pathlib.Path) -> tuple[bool, str, str]:
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=SUITE_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
-        return False, "suite timed out after 300s", ""
+    except subprocess.TimeoutExpired as expired:
+        # Not FAILED. The suite never reached a verdict, so this run says
+        # nothing at all about the mutation it was checking.
+        return DID_NOT_FINISH, f"suite timed out after {expired.timeout}s", ""
     output = proc.stdout + proc.stderr
     tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
-    return proc.returncode == 0, (tail[-1] if tail else "no output"), output
+    outcome = PASSED if proc.returncode == 0 else FAILED
+    return outcome, (tail[-1] if tail else "no output"), output
 
 
 def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
@@ -780,24 +810,28 @@ def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path
         # nothing. It used to crash the whole run instead, which meant one
         # entry naming a file absent on the current branch took down every
         # later entry's check too.
-        return "STALE", name, f"{relpath} does not exist, so nothing was verified"
+        return STALE, name, f"{relpath} does not exist, so nothing was verified"
     text = source.read_text()
     if original not in text:
-        return "STALE", name, "snippet not found, so nothing was verified"
+        return STALE, name, "snippet not found, so nothing was verified"
 
     sandbox = sandboxes.get()
     try:
         path = sandbox / relpath
         path.write_text(text.replace(original, reverted, 1))
         try:
-            ok, msg, _ = run_suite(sandbox)
+            outcome, msg, _ = run_suite(sandbox)
         finally:
             # The sandbox is reused by the next entry, so put the file back
             # even though nothing outside this directory can see it.
             path.write_text(text)
     finally:
         sandboxes.put(sandbox)
-    return ("CAUGHT" if not ok else "MISSED"), name, msg
+    # Anything that is not a completed pass or a completed failure is
+    # inconclusive. The mapping is deliberately explicit rather than a
+    # `not ok`: only a suite that ran to a red verdict earns CAUGHT.
+    verdict = {FAILED: CAUGHT, PASSED: MISSED}.get(outcome, INCONCLUSIVE)
+    return verdict, name, msg
 
 
 def shard(entries: list, spec: str | None) -> list:
@@ -846,10 +880,10 @@ def main(argv: list[str]) -> int:
 
         print(f"baseline ({workers} workers): ", end="", flush=True)
         first = sandboxes.get()
-        ok, msg, output = run_suite(first)
+        outcome, msg, output = run_suite(first)
         sandboxes.put(first)
-        print(f"{'PASS' if ok else 'FAIL'}  {msg}")
-        if not ok:
+        print(f"{'PASS' if outcome == PASSED else 'FAIL'}  {msg}")
+        if outcome != PASSED:
             # The whole run stops here, so print what actually failed.
             # Reporting only "baseline must pass" leaves no way to diagnose it
             # from a CI log, where nobody can re-run the suite by hand.
@@ -858,33 +892,32 @@ def main(argv: list[str]) -> int:
             print("baseline must pass before mutating")
             return 1
 
-        gaps = []
-        stale = []
+        failures: dict[str, list[str]] = {verdict: [] for verdict in FAILURE_HEADLINE}
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             # `map` yields in submission order, so the log reads the same way
             # it did when this ran one entry at a time.
             for verdict, name, detail in pool.map(lambda e: check(e, sandboxes), entries):
-                if verdict == "STALE":
+                if verdict == STALE:
                     print(f"  STALE  {name}: {detail}")
-                    stale.append(name)
-                    continue
-                print(f"  {verdict:<7} {name}\n           -> {detail}")
-                if verdict == "MISSED":
-                    gaps.append(name)
+                else:
+                    print(f"  {verdict:<12} {name}\n                -> {detail}")
+                if verdict in failures:
+                    failures[verdict].append(name)
 
     print()
-    if stale:
-        print(f"{len(stale)} mutation(s) no longer match the code and verified nothing:")
-        for s in stale:
-            print(f"  - {s}")
-        print("  fix the snippet; a stale mutation reads as a pass and is not one")
-    if gaps:
-        print(f"{len(gaps)} fix(es) with NO regression coverage:")
-        for g in gaps:
-            print(f"  - {g}")
-    if not gaps and not stale:
+    for verdict, names in failures.items():
+        if not names:
+            continue
+        print(f"{len(names)} {FAILURE_HEADLINE[verdict]}")
+        for name in names:
+            print(f"  - {name}")
+        if verdict == STALE:
+            print("  fix the snippet; a stale mutation reads as a pass and is not one")
+        if verdict == INCONCLUSIVE:
+            print("  re-run these; an unfinished run is not evidence of anything")
+    if not any(failures.values()):
         print("every logged fix is covered by a failing test")
-    return 1 if (gaps or stale) else 0
+    return 1 if any(failures.values()) else 0
 
 
 if __name__ == "__main__":
