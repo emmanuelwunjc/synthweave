@@ -57,22 +57,47 @@ _PERSONAL_PATTERNS = (
     ("phone number", re.compile(r"\b\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")),
 )
 
+# --- the credential shape, in three parts -------------------------------
+#
+# The name. A credential stem is one underscore-delimited *part* of the
+# identifier, not necessarily its last part. The merged version anchored with
+# `\b` right after the stem, which required the stem to end the name, so
+# `aws_secret_access_key` -- the canonical AWS variable name, and the most
+# commonly leaked credential shape in public repos -- passed clean (#153).
+# Allowing parts on both sides catches that, `secret_key_base` and
+# `census_key`, while the `_`-delimited structure still refuses `keyword=`
+# and `monkey_patch`: a stem has to be a whole part, not a substring.
+_CREDENTIAL_NAME = (
+    r"\b(?:[A-Z0-9]+_)*"
+    r"(?:KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"
+    r"(?:_[A-Z0-9]+)*\b"
+)
+
+# The value. Judgement call, deliberately made: the keyword carries the
+# signal, the value only has to rule out prose and obvious placeholders, so
+# the bar is the *lower* of two tests rather than one strict one.
+#   - 12+ characters *with a digit*: catches `API_KEY=abc123def456ghi7`, which  # leak-guard: allow (the fake value this bound exists to catch)
+#     the old 20-character floor waved through. A real secret this short is
+#     still random enough to contain a digit.
+#   - 20+ characters, digit or not: catches `password: correcthorsebatterystaple`,  # leak-guard: allow (the fake value this bound exists to catch)
+#     which the old digit requirement waved through. Prose does not survive
+#     20 unbroken identifier characters.
+# Neither test reaches the fixtures that would get this guard switched off:
+# `CENSUS_API_KEY=dotenv-key` (10), `=ancestor-key` (12, no digit) and
+# `=root-key` (8) in tests/test_acs_pums.py all stay under both bars, and a
+# docstring's `api_key: overrides ...` stops at the first space.
+_CREDENTIAL_VALUE = (
+    r"[\"']?(?:(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{12,}|[A-Za-z0-9_\-]{20,})"
+)
+
+_CREDENTIAL = r"(?i)" + _CREDENTIAL_NAME + r"\s*[=:]\s*" + _CREDENTIAL_VALUE
+
+
 # Shapes that are never legitimate anywhere, including in the package. A
 # credential is not synthetic test data, and a path rooted in someone's home
 # directory names the machine's owner and cannot work on anyone else's.
 _UNIVERSAL_PATTERNS = (
-    # The value has to look like a key, not like prose or a placeholder: 20+
-    # characters with at least one digit. Without that bound this fires on
-    # `api_key: overrides ...` in a docstring, and on the deliberately fake
-    # `CENSUS_API_KEY=dotenv-key` fixtures in tests/test_acs_pums.py. A real
-    # Census key is 40 hex characters and still matches.
-    (
-        "credential",
-        re.compile(
-            r"(?i)\b[A-Z0-9_]*(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD)\b"
-            r"\s*[=:]\s*[\"']?(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{20,}"
-        ),
-    ),
+    ("credential", re.compile(_CREDENTIAL)),
     # /home/runner is GitHub Actions' own working directory and names nobody.
     ("personal absolute path", re.compile(r"/(?:Users|home)/(?!runner\b)[A-Za-z0-9._-]+/")),
 )
@@ -103,12 +128,25 @@ def is_git_checkout() -> bool:
         return False
 
 
+def _git_lines(*args: str) -> list[str]:
+    """Run git, or raise NoGitCheckout rather than let FileNotFoundError out.
+
+    Without this, `check_no_private_leak.py` with no paths and no git binary
+    printed a traceback (#153). It still exited non-zero, so it failed closed,
+    but the message named an exception instead of the problem.
+    """
+    try:
+        return _git(*args).stdout.split()
+    except FileNotFoundError as error:
+        raise NoGitCheckout("git is not installed") from error
+
+
 def tracked_files() -> list[str]:
-    return _git("ls-files").stdout.split()
+    return _git_lines("ls-files")
 
 
 def staged_files() -> list[str]:
-    return _git("diff", "--cached", "--name-only", "--diff-filter=ACMR").stdout.split()
+    return _git_lines("diff", "--cached", "--name-only", "--diff-filter=ACMR")
 
 
 def private_path_reason(path: str):
@@ -161,13 +199,17 @@ def _read(path: str) -> str:
         return ""
 
 
+def _report_no_git(error: Exception) -> int:
+    print(f"leak-guard cannot read the ignore rules: {error}.")
+    print("Refusing to pass rather than guess. Run this inside a git checkout.")
+    return 1
+
+
 def main(paths: list) -> int:
     try:
         private = [(path, private_path_reason(path)) for path in paths]
     except NoGitCheckout as error:
-        print(f"leak-guard cannot read the ignore rules: {error}.")
-        print("Refusing to pass rather than guess. Run this inside a git checkout.")
-        return 1
+        return _report_no_git(error)
     private = [(path, reason) for path, reason in private if reason]
     blocked = {path for path, _ in private}
     leaks = [
@@ -197,5 +239,19 @@ def main(paths: list) -> int:
     return 1
 
 
+def cli(argv: list) -> int:
+    """Entry point. Works out which paths to check, then checks them.
+
+    Split out from `main` so that "which paths" can fail on its own terms:
+    with no arguments it asks git for the staged files, and that is the call
+    that has no git binary to talk to.
+    """
+    try:
+        paths = argv or staged_files()
+    except NoGitCheckout as error:
+        return _report_no_git(error)
+    return main(paths)
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:] or staged_files()))
+    sys.exit(cli(sys.argv[1:]))
