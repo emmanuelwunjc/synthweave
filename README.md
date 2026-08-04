@@ -9,7 +9,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Quickstart](#quickstart) · [Why](#why-synthweave) · [How it works](#how-it-works) · [Three ways to use it](#three-ways-to-use-it) · [FAQ](#faq) · [Full guide](docs/GUIDE.md)
+[Quickstart](#quickstart) · [Why](#why-synthweave) · [How it works](#how-it-works) · [Three ways to use it](#three-ways-to-use-it) · [FAQ](#faq) · [Full guide](docs/GUIDE.md) · [Doc index](docs/MAP.md)
 
 </div>
 
@@ -341,7 +341,8 @@ PYTHONPATH=src python -m pytest tests/ -q
 Tests run offline and go through the public API only, so internal stage code can
 be rewritten without touching them. Every bug fix is checked by reverting it and
 confirming a test goes red: a fix nothing catches is not a fix. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md). For everything else in `docs/` and which
+file covers what, see [docs/MAP.md](docs/MAP.md).
 
 ## Where this came from
 

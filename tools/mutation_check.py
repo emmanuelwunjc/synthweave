@@ -1,36 +1,48 @@
 """Mutation harness: revert each logged fix, confirm the suite goes red.
 
-A fix with no test that catches its absence is not locked down. This applies
-each revert one at a time, runs the suite, restores the file, and reports
-whether the suite noticed.
+A fix with no test that catches its absence is not locked down. Each revert is
+applied to a throwaway copy of the checkout, the suite runs against that copy,
+and the harness reports whether the suite noticed.
+
+Two properties are load-bearing and neither is traded for speed:
+
+- MISSED: a reverted fix that no test catches fails the run.
+- STALE: an entry whose file or snippet no longer matches verified nothing, so
+  it fails the run too.
+
+Every mutation is independent, so they run concurrently, one sandbox per
+worker. Sandboxing is what makes that safe: the real working tree is never
+written to, which also retires the 2026-07-31 false alarm (a killed process
+leaving a reverted snippet behind) and the 2026-08-02 hazard where a
+concurrent `git checkout` tripped over a mid-run mutation.
+
+    python3 tools/mutation_check.py                # every entry
+    python3 tools/mutation_check.py --shard 2/6    # one CI runner's share
+
+CI fans the shards out across runners and rolls them up into the
+`mutation-check` gate. `tests/test_mutation_shards.py` asserts the shards
+partition the list and that the workflow's matrix matches the `N` it passes;
+a shard that quietly skips entries would report a pass it never earned.
 """
 
-import atexit
+import concurrent.futures
 import os
 import pathlib
-import signal
+import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Guards against the 2026-07-31 false alarm: an external timeout killed this
-# process mid-mutation and left a reverted snippet in the working tree,
-# which then looked like a real regression. Each mutation's own try/finally
-# already restores on a normal exception; this covers the process itself
-# being torn down (SIGTERM, or the interpreter's own atexit) between the
-# write and the finally block running.
-_pending_restore: tuple[pathlib.Path, str] | None = None
-
-
-def _restore_pending(*_args) -> None:
-    if _pending_restore is not None:
-        path, text = _pending_restore
-        path.write_text(text)
-
-
-atexit.register(_restore_pending)
-signal.signal(signal.SIGTERM, lambda *a: (_restore_pending(), sys.exit(1)))
+# Copied per worker: everything except the version-control metadata and caches.
+# `.git` is skipped because it dominates the copy cost and because in a linked
+# worktree it is a file pointing at another directory, which would not survive
+# the copy anyway. One consequence, checked and accepted: `test_docs_map_sync`
+# self-skips without a git checkout, so it runs against the real tree but not
+# inside a sandbox. It guards a docs index, not any entry in MUTATIONS.
+SANDBOX_SKIP = (".git", "__pycache__", ".pytest_cache")
 
 # (issue, file, original_snippet, reverted_snippet)
 MUTATIONS = [
@@ -431,6 +443,32 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#60 PackageNotFoundError stays out of the public namespace",
+        "src/synthweave/__init__.py",
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import PackageNotFoundError\n"
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+    ),
+    (
+        "#63 faker_names validates Faker's private provider shape",
+        "src/synthweave/connectors/faker_names.py",
+        "    pool: Any = _checked_provider_pool(Provider, attr)",
+        "    pool: Any = getattr(Provider, attr)",
+    ),
+    (
+        "#63 faker_names weight check separates non-numeric, non-finite and non-positive",
+        "src/synthweave/connectors/faker_names.py",
+        '        if not isinstance(weight, numbers.Real) or isinstance(weight, bool):\n'
+        '            raise bad(f"has a non-numeric weight {weight!r} for {name!r}")\n'
+        "        if not math.isfinite(weight):\n"
+        '            raise bad(f"has a non-finite weight {weight!r} for {name!r}")\n'
+        "        if not weight > 0:",
+        "        if not isinstance(weight, (int, float)) or isinstance(weight, bool)"
+        " or not weight > 0:",
+    ),
+    (
         "#62 I32 the ACS response is parsed before it is cached",
         "src/synthweave/connectors/acs_pums.py",
         """    frame = _to_frame(payload, variables, url)
@@ -464,16 +502,22 @@ MUTATIONS = [
 ]
 
 
-def run_suite() -> tuple[bool, str, str]:
+def run_suite(cwd: pathlib.Path) -> tuple[bool, str, str]:
     # Inherit the real environment and override only PYTHONPATH. Replacing it
     # outright used to work on a dev machine and fail on a CI runner, where
     # the interpreter lives outside a hardcoded PATH and the suite needs
     # variables (HOME among them) that a stripped env does not carry.
+    #
+    # PYTHONPATH is relative on purpose: it resolves against `cwd`, so the
+    # suite imports the sandbox's copy of the package rather than the one in
+    # the checkout. CI's `pip install -e .` must not win here, which is what
+    # the baseline run below actually proves -- an editable install shadowing
+    # the sandbox would make the very first mutation report MISSED.
     env = {**os.environ, "PYTHONPATH": "src"}
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/", "-q", "--no-header", "-x", "-W", "error::UserWarning"],
-            cwd=ROOT,
+            cwd=cwd,
             env=env,
             capture_output=True,
             text=True,
@@ -486,56 +530,121 @@ def run_suite() -> tuple[bool, str, str]:
     return proc.returncode == 0, (tail[-1] if tail else "no output"), output
 
 
-print("baseline: ", end="", flush=True)
-ok, msg, output = run_suite()
-print(f"{'PASS' if ok else 'FAIL'}  {msg}")
-if not ok:
-    # The whole run stops here, so print what actually failed. Reporting only
-    # "baseline must pass" leaves no way to diagnose it from a CI log, where
-    # nobody can re-run the suite by hand.
-    print("\n--- baseline failure output ---")
-    print(output)
-    sys.exit("baseline must pass before mutating")
-
-gaps = []
-stale = []
-for name, relpath, original, reverted in MUTATIONS:
-    path = ROOT / relpath
-    if not path.exists():
+def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
+    """Verify one entry. Returns (verdict, name, detail); verdict is the label."""
+    name, relpath, original, reverted = entry
+    source = ROOT / relpath
+    if not source.exists():
         # A missing file verifies exactly as much as a missing snippet does:
         # nothing. It used to crash the whole run instead, which meant one
         # entry naming a file absent on the current branch took down every
         # later entry's check too.
-        print(f"  STALE  {name}: {relpath} does not exist, so nothing was verified")
-        stale.append(name)
-        continue
-    text = path.read_text()
+        return "STALE", name, f"{relpath} does not exist, so nothing was verified"
+    text = source.read_text()
     if original not in text:
-        print(f"  STALE  {name}: snippet not found, so nothing was verified")
-        stale.append(name)
-        continue
-    path.write_text(text.replace(original, reverted, 1))
-    _pending_restore = (path, text)
-    try:
-        ok, msg, _ = run_suite()
-    finally:
-        path.write_text(text)
-        _pending_restore = None
-    caught = not ok
-    print(f"  {'CAUGHT ' if caught else 'MISSED '} {name}\n           -> {msg}")
-    if not caught:
-        gaps.append(name)
+        return "STALE", name, "snippet not found, so nothing was verified"
 
-print()
-if stale:
-    print(f"{len(stale)} mutation(s) no longer match the code and verified nothing:")
-    for s in stale:
-        print(f"  - {s}")
-    print("  fix the snippet; a stale mutation reads as a pass and is not one")
-if gaps:
-    print(f"{len(gaps)} fix(es) with NO regression coverage:")
-    for g in gaps:
-        print(f"  - {g}")
-if not gaps and not stale:
-    print("every logged fix is covered by a failing test")
-sys.exit(1 if (gaps or stale) else 0)
+    sandbox = sandboxes.get()
+    try:
+        path = sandbox / relpath
+        path.write_text(text.replace(original, reverted, 1))
+        try:
+            ok, msg, _ = run_suite(sandbox)
+        finally:
+            # The sandbox is reused by the next entry, so put the file back
+            # even though nothing outside this directory can see it.
+            path.write_text(text)
+    finally:
+        sandboxes.put(sandbox)
+    return ("CAUGHT" if not ok else "MISSED"), name, msg
+
+
+def shard(entries: list, spec: str | None) -> list:
+    """Return the `i/N` slice of `entries`, or all of them when spec is None.
+
+    Strided, not chunked, and deliberately so: `entries[i-1::N]` covers every
+    index exactly once for *any* N, so no arithmetic can drop an entry the way
+    a start/stop chunk calculation can when the count does not divide evenly.
+    That property is the whole point. A shard that silently skips a mutation
+    reports a pass it never earned, which is the one failure mode this harness
+    exists to prevent.
+    """
+    if spec is None:
+        return list(entries)
+    index, _, count = spec.partition("/")
+    if not count.isdigit() or not index.isdigit():
+        raise SystemExit(f"--shard wants i/N with both parts numeric, got {spec!r}")
+    index, count = int(index), int(count)
+    if count < 1 or not 1 <= index <= count:
+        raise SystemExit(f"--shard {spec}: need 1 <= i <= N and N >= 1")
+    return list(entries)[index - 1 :: count]
+
+
+def main(argv: list[str]) -> int:
+    spec = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--shard":
+            raise SystemExit(f"usage: {sys.argv[0]} [--shard i/N]")
+        spec = argv[1]
+    entries = shard(MUTATIONS, spec)
+    # Printed so the sum across a CI matrix is auditable from the logs alone:
+    # the counts have to add up to the total, or a shard was left unrun.
+    print(f"shard {spec or 'all'}: {len(entries)} of {len(MUTATIONS)} mutations")
+    if not entries:
+        raise SystemExit(f"--shard {spec}: no mutations in this shard, so nothing would be verified")
+
+    with tempfile.TemporaryDirectory(prefix="mutation-check-") as tmp:
+        # One sandbox per worker, not per mutation: the copy is reused, so the
+        # copy cost is paid `workers` times rather than once per entry.
+        workers = min(len(entries), os.cpu_count() or 1)
+        sandboxes: "queue.Queue[pathlib.Path]" = queue.Queue()
+        for i in range(workers):
+            box = pathlib.Path(tmp) / f"w{i}"
+            shutil.copytree(ROOT, box, ignore=shutil.ignore_patterns(*SANDBOX_SKIP), symlinks=True)
+            sandboxes.put(box)
+
+        print(f"baseline ({workers} workers): ", end="", flush=True)
+        first = sandboxes.get()
+        ok, msg, output = run_suite(first)
+        sandboxes.put(first)
+        print(f"{'PASS' if ok else 'FAIL'}  {msg}")
+        if not ok:
+            # The whole run stops here, so print what actually failed.
+            # Reporting only "baseline must pass" leaves no way to diagnose it
+            # from a CI log, where nobody can re-run the suite by hand.
+            print("\n--- baseline failure output ---")
+            print(output)
+            print("baseline must pass before mutating")
+            return 1
+
+        gaps = []
+        stale = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            # `map` yields in submission order, so the log reads the same way
+            # it did when this ran one entry at a time.
+            for verdict, name, detail in pool.map(lambda e: check(e, sandboxes), entries):
+                if verdict == "STALE":
+                    print(f"  STALE  {name}: {detail}")
+                    stale.append(name)
+                    continue
+                print(f"  {verdict:<7} {name}\n           -> {detail}")
+                if verdict == "MISSED":
+                    gaps.append(name)
+
+    print()
+    if stale:
+        print(f"{len(stale)} mutation(s) no longer match the code and verified nothing:")
+        for s in stale:
+            print(f"  - {s}")
+        print("  fix the snippet; a stale mutation reads as a pass and is not one")
+    if gaps:
+        print(f"{len(gaps)} fix(es) with NO regression coverage:")
+        for g in gaps:
+            print(f"  - {g}")
+    if not gaps and not stale:
+        print("every logged fix is covered by a failing test")
+    return 1 if (gaps or stale) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

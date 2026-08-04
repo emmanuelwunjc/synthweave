@@ -31,6 +31,8 @@ different kind of data source entirely — see `docs/NEXT_STEPS.md`.
 
 from __future__ import annotations
 
+import math
+import numbers
 from typing import Any
 
 import numpy as np
@@ -39,6 +41,18 @@ import pandas as pd
 from .. import _hash
 
 _FIELDS = ("first_name", "first_name_female", "first_name_male", "last_name")
+
+# The Faker attributes read below are internals, not public API, so the shape
+# they are expected to have is stated here and checked at pool-build time.
+# Keep in step with the `Faker` bound in `pyproject.toml`.
+_FAKER_SUPPORTED = "Faker>=20,<41"
+
+_PROVIDER_ATTRS = {
+    "first_name": "first_names",
+    "first_name_female": "first_names_female",
+    "first_name_male": "first_names_male",
+    "last_name": "last_names",
+}
 
 
 class Name:
@@ -106,7 +120,7 @@ class SSN:
         )
 
 
-def _name_pool(which: str) -> tuple[np.ndarray, np.ndarray | None]:
+def _name_pool(which: str) -> tuple[np.ndarray, np.ndarray]:
     """Values and weights for one of the four supported name pools.
 
     Imports Faker lazily and only here, so `synthweave.connectors` itself
@@ -114,17 +128,61 @@ def _name_pool(which: str) -> tuple[np.ndarray, np.ndarray | None]:
     """
     from faker.providers.person.en_US import Provider
 
-    attr = {
-        "first_name": "first_names",
-        "first_name_female": "first_names_female",
-        "first_name_male": "first_names_male",
-        "last_name": "last_names",
-    }[which]
-    pool: Any = getattr(Provider, attr)
-    if isinstance(pool, dict):
-        values = np.array(list(pool.keys()), dtype=object)
-        weights = np.array(list(pool.values()), dtype=np.float64)
-    else:
-        values = np.array(list(pool), dtype=object)
-        weights = None
+    attr = _PROVIDER_ATTRS[which]
+    pool: Any = _checked_provider_pool(Provider, attr)
+    values = np.array(list(pool.keys()), dtype=object)
+    weights = np.array(list(pool.values()), dtype=np.float64)
     return values, weights
+
+
+def _checked_provider_pool(provider: Any, attr: str) -> dict:
+    """`provider.attr`, confirmed to still be a non-empty weighted name mapping.
+
+    `first_names` and friends are Faker internals. They can change shape in any
+    release with no deprecation path, and the two bad outcomes differ: a missing
+    attribute raises a bare `AttributeError` that names no cause, while a shape
+    change from weighted mapping to plain sequence would keep working and
+    silently drop the frequency weighting this module exists to provide. Both
+    are turned into one error that names the attribute and the supported range.
+    """
+
+    def bad(problem: str) -> RuntimeError:
+        return RuntimeError(
+            f"faker_names: Faker's private attribute "
+            f"faker.providers.person.en_US.Provider.{attr} {problem}. synthweave reads "
+            f"this internal directly for deterministic, frequency-weighted picks, so a "
+            f"change to its shape breaks it. Supported: {_FAKER_SUPPORTED}, installed: "
+            f"{_faker_version()}."
+        )
+
+    if not hasattr(provider, attr):
+        raise bad("is missing")
+    pool = getattr(provider, attr)
+    if not isinstance(pool, dict):
+        raise bad(f"is a {type(pool).__name__}, not a name-to-weight mapping")
+    if not pool:
+        raise bad("is an empty mapping")
+    for name, weight in pool.items():
+        if not isinstance(name, str):
+            raise bad(f"has a non-string name {name!r}")
+        if not isinstance(weight, numbers.Real) or isinstance(weight, bool):
+            raise bad(f"has a non-numeric weight {weight!r} for {name!r}")
+        if not math.isfinite(weight):
+            raise bad(f"has a non-finite weight {weight!r} for {name!r}")
+        if not weight > 0:
+            raise bad(f"has a non-positive weight {weight!r} for {name!r}")
+    return pool
+
+
+def _faker_version() -> str:
+    """The installed Faker version, from packaging metadata rather than Faker itself.
+
+    Reading `faker.VERSION` would be one more internal to depend on, in the one
+    code path that only runs because an internal already moved.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("Faker")
+    except PackageNotFoundError:
+        return "unknown"

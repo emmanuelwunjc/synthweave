@@ -13,5 +13,5 @@ repos:
         name: pyflakes
         entry: python3 -m pyflakes
         language: system
-        files: ^(src|tests|examples)/
+        files: ^(src|tests|examples|tools)/
         types: [python]
