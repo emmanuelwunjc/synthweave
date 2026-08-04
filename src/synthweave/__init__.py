@@ -50,7 +50,7 @@ The same person's `tax_id` is identical in every table carrying it, because
 identifiers are derived from (seed, entity, tag) rather than looked up.
 """
 
-from importlib.metadata import PackageNotFoundError
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _installed_version
 
 from ._hash import derive_id
@@ -90,7 +90,7 @@ from .validation import SchemaError
 # its own metadata about what it is.
 try:
     __version__ = _installed_version("synthweave")
-except PackageNotFoundError:
+except _PackageNotFoundError:
     # Running from a source tree that was never installed, e.g. via
     # PYTHONPATH=src. There is no metadata to read, and guessing a number
     # here would recreate exactly the drift this avoids.
