@@ -54,7 +54,7 @@ def test_missing_on_an_int_column_widens_to_nullable_int(schema):
     assert out["birth_year"].isna().any()
 
 
-def test_typo_still_produces_an_object_column(schema):
+def test_typo_still_produces_a_text_column(schema):
     """A real type change (number -> corrupted text) must still show up.
 
     Restoring dtype after corruption must not paper over a genuine change:
@@ -64,4 +64,7 @@ def test_typo_still_produces_an_object_column(schema):
         schema, noiser=sw.Noise({"roster": {"education": [sw.Typo(0.5)]}})
     ).run()["roster"]
 
-    assert out["education"].dtype == object
+    # Spelled dtype-agnostically: a text column is `object` on pandas 2 and `str`
+    # on pandas 3. What matters is that it is text and not the original number.
+    assert pd.api.types.is_string_dtype(out["education"])
+    assert not pd.api.types.is_numeric_dtype(out["education"])
