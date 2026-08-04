@@ -31,6 +31,8 @@ different kind of data source entirely — see `docs/NEXT_STEPS.md`.
 
 from __future__ import annotations
 
+import math
+import numbers
 from typing import Any
 
 import numpy as np
@@ -163,7 +165,11 @@ def _checked_provider_pool(provider: Any, attr: str) -> dict:
     for name, weight in pool.items():
         if not isinstance(name, str):
             raise bad(f"has a non-string name {name!r}")
-        if not isinstance(weight, (int, float)) or isinstance(weight, bool) or not weight > 0:
+        if not isinstance(weight, numbers.Real) or isinstance(weight, bool):
+            raise bad(f"has a non-numeric weight {weight!r} for {name!r}")
+        if not math.isfinite(weight):
+            raise bad(f"has a non-finite weight {weight!r} for {name!r}")
+        if not weight > 0:
             raise bad(f"has a non-positive weight {weight!r} for {name!r}")
     return pool
 

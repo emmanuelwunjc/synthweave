@@ -186,14 +186,51 @@ def test_empty_provider_mapping_is_rejected(monkeypatch):
         Name("last_name")
 
 
-@pytest.mark.parametrize("weight", [0.0, -1.0, "0.01", None])
-def test_non_positive_or_non_numeric_weight_is_rejected(monkeypatch, weight):
-    """Weights must be positive numbers: `pick` divides by their sum."""
+@pytest.mark.parametrize(
+    "weight, problem",
+    [
+        (0.0, "non-positive"),
+        (-1.0, "non-positive"),
+        ("0.01", "non-numeric"),
+        (None, "non-numeric"),
+        (True, "non-numeric"),
+        (float("inf"), "non-finite"),
+        (float("nan"), "non-finite"),
+    ],
+)
+def test_unusable_weight_is_rejected_and_the_message_says_why(monkeypatch, weight, problem):
+    """Weights must be finite positive numbers, and the error must say which rule broke.
+
+    `pick` divides by their sum, so a non-finite weight is as unusable as a
+    negative one: `_hash.pick` rejects it with a bare `ValueError` that names
+    neither Faker nor the attribute, which is the failure mode this guard
+    exists to replace. Reporting a string or `None` as a "non-positive weight"
+    would be a factually wrong diagnostic in the one code path whose only job
+    is to diagnose.
+    """
     from faker.providers.person.en_US import Provider
 
     monkeypatch.setattr(Provider, "first_names", {"Aaron": 1.0, "Adam": weight}, raising=True)
-    with pytest.raises(RuntimeError, match="first_names"):
+    with pytest.raises(RuntimeError) as excinfo:
         Name("first_name")
+    message = str(excinfo.value)
+    assert "first_names" in message
+    assert problem in message
+
+
+@pytest.mark.parametrize("weight", [np.float32(0.5), np.int64(2), np.float64(0.25)])
+def test_numpy_scalar_weights_are_accepted(monkeypatch, weight):
+    """Real numeric types other than `float` must not be mistaken for a shape break.
+
+    The guard's job is to catch Faker changing shape, not to reject a weight
+    that is a perfectly usable number `numpy` happens to own.
+    """
+    from faker.providers.person.en_US import Provider
+
+    monkeypatch.setattr(Provider, "first_names", {"Aaron": 1.0, "Adam": weight}, raising=True)
+    values, weights = _pool("first_name")
+    assert len(values) == len(weights) == 2
+    assert (weights > 0).all()
 
 
 def test_valid_provider_data_still_builds_a_weighted_pool():
