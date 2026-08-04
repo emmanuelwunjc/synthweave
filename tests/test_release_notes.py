@@ -208,7 +208,8 @@ def test_the_range_ignores_a_non_release_tag_on_the_release_commit(tmp_path, mon
     A tag that has nothing to do with releasing then blocks a release.
     """
     _run(tmp_path, "init", "-q", "-b", "main")
-    _run(tmp_path, "config", "user.email", "t@example.test")
+    # `.test` is an RFC 2606 reserved TLD, so this cannot be a real mailbox.
+    _run(tmp_path, "config", "user.email", "t@example.test")  # leak-guard: allow
     _run(tmp_path, "config", "user.name", "t")
     (tmp_path / "a.txt").write_text("one\n")
     _run(tmp_path, "add", "a.txt")
