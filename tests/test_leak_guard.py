@@ -104,9 +104,9 @@ def test_private_paths_come_from_gitignore_not_a_hardcoded_list():
 @pytest.mark.parametrize(
     "line",
     [
-        "subject ssn is 123-45-6789 per the intake form",
-        "contact: jane.doe@example.org",
-        "call 415-555-0142 to confirm",
+        "subject ssn is 123-45-6789 per the intake form",  # leak-guard: allow (this guard's own SSN fixture)
+        "contact: jane.doe@example.org",  # leak-guard: allow (example.org is the reserved documentation domain)
+        "call 415-555-0142 to confirm",  # leak-guard: allow (555-01xx is the reserved fictional range)
         "CENSUS_API_KEY=0123456789abcdef0123456789abcdef01234567",  # leak-guard: allow (fixture)
         "loaded from /Users/yw1084/code/synthweave/private.csv",  # leak-guard: allow (fixture)
     ],
@@ -115,44 +115,102 @@ def test_pii_shapes_are_caught_in_a_data_shaped_file(line):
     assert guard.pii_findings("docs/GUIDE.md", line)
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The keyword sits in the middle of the name, not at the end. `\b`
+        # after the stem required it to end the identifier, so every one of
+        # these passed clean through the guard as merged (issue #153).
+        "aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",  # leak-guard: allow (fake AWS example key from AWS' own docs)
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",  # leak-guard: allow (fake AWS example key from AWS' own docs)
+        "secret_key_base=0123456789abcdef0123456789abcdef01234567",  # leak-guard: allow (fixture)
+        "census_key=0123456789abcdef0123456789abcdef01234567",  # leak-guard: allow (fixture)
+        # Short-but-random, and long-but-wordy. The 20-character-with-a-digit
+        # value bound waved both of these through.
+        "API_KEY=abc123def456ghi7",  # leak-guard: allow (fixture)
+        "password: correcthorsebatterystaple",  # leak-guard: allow (fixture)
+        # .json and .yaml are both scanned suffixes, and in both the name is
+        # quoted, so the `=`/`:` does not follow the identifier directly.
+        '  "aws_secret_access_key": "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",',  # leak-guard: allow (fake AWS example key from AWS' own docs)
+    ],
+)
+def test_compound_credential_names_are_caught(line):
+    """`aws_secret_access_key` is the canonical AWS variable name, and the
+    single most commonly leaked credential shape in public repositories."""
+    assert guard.pii_findings("docs/GUIDE.md", line)
+
+
 def test_findings_report_the_line_number():
-    findings = guard.pii_findings("notes.md", "clean\nssn 123-45-6789\n")
+    findings = guard.pii_findings("notes.md", "clean\nssn 123-45-6789\n")  # leak-guard: allow (this guard's own SSN fixture)
     assert findings and findings[0][0] == 2
 
 
 # --- the false positives that would get the guard turned off -------------
 
 
-def test_synthetic_fixtures_in_the_package_are_not_flagged():
-    """This repo generates fake SSNs, names and emails on purpose
-    (src/synthweave/stages, tests/test_faker_names.py, and issue I28 is
-    literally about SSN area codes). Flagging those makes the guard noise,
-    and a noisy guard gets disabled, which protects nothing.
+@pytest.mark.parametrize(
+    "path",
+    ["tests/test_intake.py", "src/synthweave/stages/identity.py",
+     "examples/three_modes.py"],
+)
+def test_a_real_person_in_the_package_is_caught(path):
+    """src/, tests/ and examples/ were blanket-exempted from the SSN, email and
+    phone shapes because "the package generates these, so it would fire
+    constantly". Measured across every tracked file it does not: the tree
+    yields eight findings, all this file's own fixtures. The exemption bought
+    that much quiet and blinded the guard across the three largest directories,
+    so it is gone (issue #154). The package generates these values at runtime;
+    a literal one written into a file is a person, and is now caught.
     """
-    body = 'SSN_FORMAT = "123-45-6789"\nemail = "a.person@example.com"\nphone = "415-555-0142"\n'
-    for path in ("src/synthweave/stages/identity.py", "tests/test_faker_names.py",
-                 "examples/three_modes.py"):
-        assert guard.pii_findings(path, body) == []
+    body = (
+        'CONTACT = "marcus.delacroix@realmail.example"\n'  # leak-guard: allow (the invented person this test exists to catch)
+        'SSN = "078-05-1120"\n'  # leak-guard: allow (078-05-1120 is the void Woolworth wallet SSN, issued to nobody)
+        'PHONE = "415-555-0142"\n'  # leak-guard: allow (555-01xx is the reserved fictional range)
+    )
+    assert {label for _, label, _ in guard.pii_findings(path, body)} == {
+        "SSN", "email address", "phone number"
+    }
 
 
 def test_secrets_are_still_caught_inside_the_package():
-    """Synthetic *data* is expected under src/, tests/ and examples/. A real
-    credential or a personal absolute path never is, so those two shapes are
-    not suppressed there."""
+    """A credential or a personal absolute path is never legitimate anywhere,
+    including under src/ and tests/."""
     assert guard.pii_findings("src/synthweave/connectors/acs_pums.py",
                               "CENSUS_API_KEY=0123456789abcdef0123456789abcdef01234567")  # leak-guard: allow (fixture)
     assert guard.pii_findings("tests/test_acs_pums.py", "path = '/Users/someone/data'")  # leak-guard: allow (fixture)
 
 
-def test_placeholder_credentials_in_fixtures_are_not_flagged():
-    """tests/test_acs_pums.py writes `CENSUS_API_KEY=dotenv-key` into a temp
-    .env, and acs_pums.py's docstring says "api_key: overrides ...". Both are
-    credential *shapes* with no credential in them. The value has to look like
-    a key (20+ characters, at least one digit) before this fires."""
-    assert guard.pii_findings("tests/test_acs_pums.py",
-                              '(tmp_path / ".env").write_text("CENSUS_API_KEY=dotenv-key\\n")') == []
-    assert guard.pii_findings("src/synthweave/connectors/acs_pums.py",
-                              "api_key: overrides `CENSUS_API_KEY` from the environment") == []
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        # Every credential-shaped line that exists in the tree today, verbatim.
+        # These are what the value bound is for. A guard that fires on a
+        # deliberately fake fixture gets switched off, and then it guards
+        # nothing, so widening the *name* half must not cost any of them.
+        ("tests/test_acs_pums.py",
+         '    (tmp_path / ".env").write_text("CENSUS_API_KEY=dotenv-key\\n")'),
+        ("tests/test_acs_pums.py",
+         '    assert "key=dotenv-key" in captured["url"]'),
+        ("tests/test_acs_pums.py",
+         '    (outer / ".env").write_text("CENSUS_API_KEY=ancestor-key\\n")'),
+        ("tests/test_acs_pums.py",
+         '    (tmp_path / ".env").write_text("CENSUS_API_KEY=root-key\\n")'),
+        ("tests/test_acs_pums.py",
+         '    assert "key=root-key" in captured["url"]'),
+        ("src/synthweave/connectors/acs_pums.py", "    api_key: str | None = None,"),
+        ("src/synthweave/connectors/acs_pums.py",
+         "        api_key: overrides `CENSUS_API_KEY` from the environment/`.env`."),
+        # The `_`-delimited part rule is what keeps the widened name half from
+        # matching any identifier that merely contains "key".
+        ("src/synthweave/pipeline.py", "    keyword = 'a_long_enough_value_here'"),
+        ("src/synthweave/pipeline.py", "    rows = sorted(rows, key=operator.itemgetter(0))"),
+    ],
+)
+def test_placeholder_credentials_in_fixtures_are_not_flagged(path, line):
+    """Credential *shapes* with no credential in them. `dotenv-key` is 10
+    characters, `ancestor-key` is 12 with no digit, `root-key` is 8, and the
+    docstring's value stops at the first space. All stay under both bars."""
+    assert guard.pii_findings(path, line) == []
 
 
 def test_a_suppression_comment_silences_one_line():
@@ -171,8 +229,23 @@ def test_no_git_checkout_fails_closed(tmp_path, monkeypatch):
     assert guard.main(["docs/HANDOFF.md"]) == 1
 
 
+def test_no_git_binary_reports_a_usable_message_not_a_traceback(capsys, monkeypatch):
+    """With no paths given the entry point calls `staged_files()`, which shells
+    out to git. When git is absent that raised an uncaught FileNotFoundError:
+    fail-closed, but with a traceback instead of an explanation (issue #153).
+    """
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(guard.subprocess, "run", no_git)
+    assert guard.cli([]) == 1
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
+    assert "git" in out
+
+
 def test_binary_and_unscanned_file_types_are_skipped():
-    assert guard.pii_findings("assets/logo.png", "123-45-6789") == []
+    assert guard.pii_findings("assets/logo.png", "123-45-6789") == []  # leak-guard: allow (this guard's own SSN fixture)
 
 
 # --- the whole point: the current tree must be quiet ---------------------
