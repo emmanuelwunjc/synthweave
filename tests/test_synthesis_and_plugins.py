@@ -511,6 +511,70 @@ def test_a_synthesized_column_keeps_the_dtype_it_had(careers):
         )
 
 
+def _extension_donors(column: str, dtype: str) -> pd.DataFrame:
+    """Donor microdata with one column held as a pandas ExtensionDtype.
+
+    Every other column stays a plain numpy dtype, so a failure points at the
+    extension dtype and nothing else about the frame. `education` carries the
+    predictor and `sector` decides `hours`, so there is real structure to fit.
+    """
+    education = np.array(["HS", "College"] * 150, dtype=object)
+    frame = pd.DataFrame(
+        {
+            "education": education,
+            "sector": np.where(education == "College", "tech", "retail"),
+            "hours": np.where(education == "College", 40, 20) + np.arange(300) % 5,
+        }
+    )
+    return frame.astype({column: dtype})
+
+
+@pytest.mark.parametrize(
+    ("column", "dtype"),
+    [("sector", "category"), ("hours", "Int64")],
+    ids=["category", "Int64"],
+)
+def test_a_synthesized_column_keeps_an_extension_dtype(careers, column, dtype):
+    """A pandas ExtensionDtype is a dtype the restore step has to honour too.
+
+    `ndarray.astype` only understands numpy dtypes, so restoring through it
+    crashes on anything pandas defines itself: `category`, nullable `Int64`,
+    and (on pandas 3) the default string dtype. Users bring these in through
+    `structure=`, and the whole point of recording the fit dtype is that the
+    column comes back the way it went in.
+    """
+    donors = _extension_donors(column, dtype)
+    synthesizer = sw.CARTSynthesizer(
+        [column], tables=["jobs"], predictors=["education"], structure=donors
+    )
+    out = sw.Pipeline(careers, synthesizer=synthesizer).run()["jobs"]
+
+    assert out[column].dtype == donors[column].dtype, (
+        f"{column} was fitted as {donors[column].dtype} and came back {out[column].dtype}"
+    )
+    invariants.assert_values_come_from(out, column, donors[column])
+
+
+@pytest.mark.parametrize(
+    ("column", "dtype"),
+    [("sector", "category"), ("hours", "Int64")],
+    ids=["category", "Int64"],
+)
+def test_an_extension_dtype_column_is_chunk_invariant(careers, column, dtype):
+    """The dtype comes from the fit, so it cannot vary with chunk_size.
+
+    A restore that inferred the type from the chunk would land a chunk of all
+    non-null values on a different dtype than one holding a null.
+    """
+    synthesizer = sw.CARTSynthesizer(
+        [column],
+        tables=["jobs"],
+        predictors=["education"],
+        structure=_extension_donors(column, dtype),
+    )
+    invariants.assert_chunk_invariant(careers, synthesizer=synthesizer)
+
+
 def test_synthesis_does_not_hide_a_numeric_column_behind_object_dtype(careers):
     """The consequence that makes the dtype worth keeping.
 

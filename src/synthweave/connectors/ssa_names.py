@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -41,6 +39,8 @@ import numpy as np
 import pandas as pd
 
 from .. import _hash
+from ._fetch import cached_dataframe
+from ._fetch import fetch_url as _fetch_url
 
 _URL = "https://www.ssa.gov/oact/babynames/names.zip"
 _DEFAULT_CACHE_DIR = Path(".synthweave_cache") / "ssa_names"
@@ -159,22 +159,13 @@ def _cache_filename(source: str | Path | None) -> str:
 
 def _ssa_data(source: str | Path | None, cache_dir: str | Path | None) -> pd.DataFrame:
     memo_key = f"{source}|{cache_dir}"
-    if memo_key in _cache:
-        return _cache[memo_key]
-
-    cache_path = None if cache_dir is None else Path(cache_dir) / _cache_filename(source)
-    if cache_path is not None and cache_path.exists():
-        frame = pd.read_csv(cache_path)
-        _cache[memo_key] = frame
-        return frame
-
-    body = _read_local(source) if source is not None else _fetch()
-    frame = _parse(body)
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(cache_path, index=False)
-    _cache[memo_key] = frame
-    return frame
+    return cached_dataframe(
+        _cache,
+        memo_key,
+        cache_dir,
+        _cache_filename(source),
+        lambda: _parse(_read_local(source) if source is not None else _fetch()),
+    )
 
 
 def _read_local(source: str | Path) -> bytes:
@@ -185,16 +176,13 @@ def _read_local(source: str | Path) -> bytes:
 
 
 def _fetch() -> bytes:
-    try:
-        with urllib.request.urlopen(_URL, timeout=60) as response:
-            if response.status != 200:
-                raise RuntimeError(f"SSA names request failed with HTTP {response.status}: {_URL}")
-            return response.read()
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"SSA names request failed: {_URL} ({e}). If this environment can't reach "
-            f"ssa.gov, download names.zip in a browser and pass source=<path> instead."
-        ) from e
+    return _fetch_url(
+        _URL,
+        timeout=60,
+        label="SSA names",
+        hint="If this environment can't reach ssa.gov, download names.zip in a "
+        "browser and pass source=<path> instead.",
+    )
 
 
 def _parse(body: bytes) -> pd.DataFrame:

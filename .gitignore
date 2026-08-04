@@ -13,6 +13,7 @@
 # The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
 docs/*
 !docs/GUIDE.md
+!docs/MAP.md
 demo/
 CLAUDE.md
 
@@ -51,6 +52,11 @@ out/
 # instructions in it are for this machine rather than for the world.
 .claude/settings.local.json
 CLAUDE.local.md
+# Skills are agent instructions, same category as docs/AUTOPILOT.md: working
+# tooling for whoever drives this repo, not part of what the package
+# publishes. Backed up to ../.private-docs-backup/ like the other local-only
+# docs, since nothing here is recoverable from git.
+.claude/skills/
 
 # Browser automation scratch output
 .playwright-mcp/
