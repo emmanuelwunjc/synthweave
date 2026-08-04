@@ -37,6 +37,11 @@ _API_BASE = "https://api.census.gov/data"
 _KEY_SIGNUP_URL = "https://api.census.gov/data/key_signup.html"
 _DEFAULT_CACHE_DIR = Path(".synthweave_cache") / "acs_pums"
 
+# What marks the top of a project, and so the last directory the `.env` walk
+# in `_read_dotenv` will look in. Anything above one of these belongs to a
+# different project, or to the user's home directory.
+_PROJECT_ROOT_MARKERS = (".git", "pyproject.toml")
+
 # USPS abbreviation -> FIPS code. A closed, fixed federal reference standard
 # (same category as a timezone or currency-code table), not schema-specific
 # data, so it stays in the connector rather than in examples/.
@@ -135,14 +140,18 @@ def fetch_pums(
 
     cache_path = _cache_path(cache_dir, url)
     if cache_path is not None and cache_path.exists():
-        payload = json.loads(cache_path.read_text())
-    else:
-        payload = _request(f"{url}&key={key}", url)
-        if cache_path is not None:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(payload))
+        return _to_frame(json.loads(cache_path.read_text()), variables, url)
 
-    return _to_frame(payload, variables, url)
+    payload = _request(f"{url}&key={key}", url)
+    # Parse before caching. A 200 OK carrying something that is not a PUMS
+    # payload (the Census API answers some bad requests with a valid-JSON
+    # error object) used to be written to disk first, so the bad response was
+    # cached permanently and every later call failed reading it back.
+    frame = _to_frame(payload, variables, url)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return frame
 
 
 def _resolve_api_key() -> str | None:
@@ -157,6 +166,12 @@ def _read_dotenv() -> dict[str, str]:
     Walks up from the current directory looking for `.env`, the way most
     dotenv tools do, since a script under `examples/` runs from the repo
     root but a test might run from elsewhere.
+
+    The walk stops at the project root: the first directory holding a
+    `_PROJECT_ROOT_MARKERS` entry ends it, after that directory's own `.env`
+    has been checked. Walking on to the filesystem root instead meant a call
+    made from a nested directory could silently read a `.env` belonging to an
+    unrelated ancestor, up to and including the home directory.
     """
     values: dict[str, str] = {}
     here = Path.cwd()
@@ -169,6 +184,8 @@ def _read_dotenv() -> dict[str, str]:
                     continue
                 name, _, value = line.partition("=")
                 values.setdefault(name.strip(), value.strip())
+            break
+        if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
             break
     return values
 

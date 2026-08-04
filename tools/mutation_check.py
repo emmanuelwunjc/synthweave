@@ -468,6 +468,37 @@ MUTATIONS = [
         "        if not isinstance(weight, (int, float)) or isinstance(weight, bool)"
         " or not weight > 0:",
     ),
+    (
+        "#62 I32 the ACS response is parsed before it is cached",
+        "src/synthweave/connectors/acs_pums.py",
+        """    frame = _to_frame(payload, variables, url)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return frame""",
+        """    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload))
+    return _to_frame(payload, variables, url)""",
+    ),
+    (
+        "#62 I33 the .env walk stops at the project root",
+        "src/synthweave/connectors/acs_pums.py",
+        """        if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
+            break
+""",
+        "",
+    ),
+    (
+        "#62 I33 the project root's own .env is read before the walk stops",
+        "src/synthweave/connectors/acs_pums.py",
+        """    for directory in (here, *here.parents):
+        candidate = directory / ".env\"""",
+        """    for directory in (here, *here.parents):
+        if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
+            break
+        candidate = directory / ".env\"""",
+    ),
 ]
 
 
