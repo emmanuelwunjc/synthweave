@@ -528,3 +528,59 @@ def test_fetch_pums_failure_propagates_unchanged():
     with patch("urllib.request.urlopen", return_value=_mock_acs_response(status=500)):
         with pytest.raises(RuntimeError, match="HTTP 500"):
             m.schema(entities=[person], tables=[table], seed=5).run()
+
+
+# --- sw.Mode.real_data(): mixed epsilons keep the donor's joint structure ---
+
+
+@pytest.fixture
+def linked_donor() -> pd.DataFrame:
+    """A donor where wage is determined by education, plus noise.
+
+    The point of the fixture is that the joint structure is the whole signal:
+    the two education groups are 50k apart, so any test that draws the columns
+    independently lands both group means on the pooled mean and cannot miss it.
+    """
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame(
+        {"education": rng.choice(["HS", "College"], size=800, p=[0.6, 0.4])}
+    )
+    frame["wage"] = np.where(frame["education"] == "College", 80_000.0, 30_000.0) + (
+        rng.normal(0, 2_000, 800)
+    )
+    return frame
+
+
+def _wage_by_education(frame: pd.DataFrame) -> dict[str, float]:
+    return {k: float(v) for k, v in frame.groupby("education")["wage"].mean().items()}
+
+
+def test_two_attributes_at_different_epsilons_keep_the_donors_joint_structure(
+    linked_donor,
+):
+    """#139: mixed epsilons used to draw each group independently.
+
+    Asserts the data, not the object graph: college graduates must still out-earn
+    high school graduates by roughly the donor's own gap. Decorrelated output
+    collapses both group means onto the pooled mean (~50k each) while every
+    univariate summary stays correct, which is why the structural test that
+    shipped alongside this could not see it.
+    """
+    m = sw.Mode.real_data(source=linked_donor, epsilon=1.0)
+    education = m.attribute("education")
+    wage = m.attribute("wage", epsilon=2.0)
+    person = m.entity(
+        "person", count=2_000, attributes={"education": education, "wage": wage}
+    )
+    table = m.table("roster", grain="person", carry=["education", "wage"])
+
+    out = m.schema(entities=[person], tables=[table], seed=11).run()["roster"]
+
+    donor = _wage_by_education(linked_donor)
+    got = _wage_by_education(out)
+    assert got["College"] == pytest.approx(donor["College"], rel=0.05), (
+        f"mixed epsilons lost the education/wage relationship: {got} vs donor {donor}"
+    )
+    assert got["HS"] == pytest.approx(donor["HS"], rel=0.05), (
+        f"mixed epsilons lost the education/wage relationship: {got} vs donor {donor}"
+    )

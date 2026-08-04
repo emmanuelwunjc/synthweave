@@ -708,6 +708,12 @@ MUTATIONS = [
         'pii = ["Faker>=20,<41"]',
         'pii = ["Faker>=20,<42"]',
     ),
+    (
+        "#139 later epsilon groups condition on the columns earlier ones produced",
+        "src/synthweave/mode.py",
+        "                columns, frame, predictors=list(conditioned), **_cart_knobs(epsilon)",
+        "                columns, frame, **_cart_knobs(epsilon)",
+    ),
 ]
 
 

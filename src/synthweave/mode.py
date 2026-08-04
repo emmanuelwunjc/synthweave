@@ -49,6 +49,14 @@ class Mode:
         generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`),
         which is real and effective but not a formal privacy guarantee. See
         `_cart_knobs` for the mapping.
+
+        Giving two attributes different epsilons does not decorrelate them.
+        Each epsilon group is fit as its own tree, but every group after the
+        first conditions on the columns the earlier groups produced, so the
+        donor's joint structure between differently-generalized attributes
+        survives. It survived nothing before #139: the groups were drawn
+        independently, so mixed epsilons kept every marginal and destroyed
+        every relationship, without a warning.
         """
         _check_epsilon(epsilon, "real_data")
         return RealDataMode(_load_source(source), epsilon=epsilon)
@@ -72,7 +80,9 @@ class Mode:
         Census respondent records, so leaving the synthesizer at its
         unbounded defaults would disclose more than the mode a user feeds
         their own data to. `attribute(name, variable=..., epsilon=...)`
-        overrides it per attribute.
+        overrides it per attribute, and mixing epsilons keeps the joint
+        structure between the attributes for the same reason `real_data`
+        does: later epsilon groups condition on the earlier ones.
         """
         _check_epsilon(epsilon, "scope")
         return ScopeMode(area_code, epsilon=epsilon)
@@ -351,16 +361,28 @@ def _epsilon_chain(
     per attribute, and one tree cannot carry two generalization levels, so
     columns asking for the same level are fit together and the groups are
     chained. Only the donor frame differs between the two modes.
+
+    Each group after the first conditions on every column the earlier groups
+    already produced, via `predictors=`. Without that the groups were drawn
+    independently and two attributes given different epsilons came out
+    uncorrelated: every univariate summary of the output stayed right and
+    every bivariate one was destroyed, silently (#139). Groups run in the
+    order their first attribute was declared, so the conditioning order is
+    the order the user wrote rather than an accident of float ordering.
     """
     groups: dict[float, list[str]] = {}
     for name, epsilon in epsilons.items():
         groups.setdefault(epsilon, []).append(name)
-    return _chain(
-        [
-            _empirical_cart(columns, frame, **_cart_knobs(epsilon))
-            for epsilon, columns in groups.items()
-        ]
-    )
+    synthesizers = []
+    conditioned: list[str] = []
+    for epsilon, columns in groups.items():
+        synthesizers.append(
+            _empirical_cart(
+                columns, frame, predictors=list(conditioned), **_cart_knobs(epsilon)
+            )
+        )
+        conditioned += columns
+    return _chain(synthesizers)
 
 
 def _chain(synthesizers: list[CARTSynthesizer]) -> CARTSynthesizer | "_ChainedSynthesizer":
