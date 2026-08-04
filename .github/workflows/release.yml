@@ -19,6 +19,7 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     permissions:
       # Mints the short-lived OIDC token PyPI exchanges for upload rights.
@@ -26,19 +27,25 @@ jobs:
       # Creates the GitHub release.
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit SHA, not the mutable v4/v5/... tag: this job holds
+      # id-token: write and publishes to PyPI, so a tag that gets force-moved
+      # upstream (it has happened to other widely-used actions) would run
+      # with those permissions before anyone here noticed. A commit SHA can't
+      # be moved. The version is kept as a trailing comment for readability.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Release notes are generated from history since the previous tag,
           # which a shallow clone would not contain.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           # Not the 3.10 floor the package supports: this job only builds a
           # pure-Python wheel and reads pyproject.toml, and the version guard
           # below needs tomllib, which is stdlib only from 3.11. Compatibility
           # with 3.10 is proven by the test matrix in ci.yml, not here.
           python-version: "3.12"
+          cache: pip
 
       # The tag is the release's claim about what version this is; the built
       # artifact is the truth. Fail loudly when they disagree, rather than
@@ -64,10 +71,10 @@ jobs:
           python -m twine check dist/*
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
       - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           # Notes come from squash-merged PR titles since the previous tag.

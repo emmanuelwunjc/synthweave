@@ -50,6 +50,28 @@ def test_second_call_hits_the_cache_not_the_network(tmp_path):
         assert urlopen.call_count == 1  # no second network call
 
 
+def test_a_response_that_fails_to_parse_is_not_cached(tmp_path):
+    """A 200 OK that is not a PUMS payload must not poison the cache.
+
+    The response used to be written to disk before `_to_frame` validated it,
+    so a valid-JSON error object from the Census API was cached permanently.
+    Every later call read it back and failed the same way, until someone
+    deleted `.synthweave_cache/` by hand. Self-perpetuating.
+    """
+    header_only = [["AGEP", "PINCP", "ST"]]
+    with patch(
+        "urllib.request.urlopen", return_value=_mock_response(json.dumps(header_only).encode())
+    ):
+        with pytest.raises(RuntimeError, match="no rows"):
+            fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=tmp_path)
+
+    assert list(tmp_path.glob("*.json")) == []
+
+    with patch("urllib.request.urlopen", return_value=_mock_response(json.dumps(PAYLOAD).encode())):
+        frame = fetch_pums(["AGEP", "PINCP"], state="36", api_key="k", cache_dir=tmp_path)
+    assert len(frame) == 3
+
+
 def test_api_key_reaches_the_request_url():
     captured = {}
 
@@ -99,6 +121,57 @@ def test_dotenv_key_is_used_when_env_var_unset(monkeypatch, tmp_path):
         fetch_pums(["AGEP", "PINCP"], state="36", cache_dir=None)
 
     assert "key=dotenv-key" in captured["url"]
+
+
+def test_dotenv_lookup_stops_at_the_project_root(monkeypatch, tmp_path):
+    """A `.env` above the project root belongs to someone else.
+
+    The walk-up used to run all the way to `/`, so a call made from a nested
+    directory could silently pick up a key from an unrelated ancestor, up to
+    and including the home directory. The walk now stops at the first
+    directory holding a project-root marker.
+    """
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / ".env").write_text("CENSUS_API_KEY=ancestor-key\n")
+    project = outer / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "unrelated"\n')
+    monkeypatch.chdir(project)
+
+    # Patched so that a key found by mistake cannot reach the live API.
+    with patch("urllib.request.urlopen") as urlopen:
+        with pytest.raises(RuntimeError, match="key_signup"):
+            fetch_pums(["AGEP", "PINCP"], state="36", cache_dir=None)
+    assert urlopen.call_count == 0
+
+
+def test_dotenv_at_the_project_root_is_read_before_the_walk_stops(monkeypatch, tmp_path):
+    """The ordinary case: the repo root holds the marker *and* the `.env`.
+
+    The stop condition has to be checked after that directory's own `.env`,
+    not before. Reversing the two makes the walk end at the repo root without
+    reading the `.env` sitting in it, which is where every documented setup
+    puts the key ("a `.env` file at the repo root"). That would break the
+    normal path for everyone while the fix's own regression test stayed green.
+    """
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\n')
+    (tmp_path / ".env").write_text("CENSUS_API_KEY=root-key\n")
+    nested = tmp_path / "examples"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    captured = {}
+
+    def fake_urlopen(url, timeout=30):
+        captured["url"] = url
+        return _mock_response(json.dumps(PAYLOAD).encode())
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        fetch_pums(["AGEP", "PINCP"], state="36", cache_dir=None)
+
+    assert "key=root-key" in captured["url"]
 
 
 # --- state name/abbreviation shorthand -----------------------------------

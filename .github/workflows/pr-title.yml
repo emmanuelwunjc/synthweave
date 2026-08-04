@@ -14,6 +14,7 @@ on:
 jobs:
   conventional:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Title must be a Conventional Commit subject
         env:
