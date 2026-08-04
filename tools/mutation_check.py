@@ -431,6 +431,15 @@ MUTATIONS = [
         "    pass",
     ),
     (
+        "#60 PackageNotFoundError stays out of the public namespace",
+        "src/synthweave/__init__.py",
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import PackageNotFoundError\n"
+        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
+        "from importlib.metadata import version as _installed_version",
+    ),
+    (
         "#63 faker_names validates Faker's private provider shape",
         "src/synthweave/connectors/faker_names.py",
         "    pool: Any = _checked_provider_pool(Provider, attr)",
