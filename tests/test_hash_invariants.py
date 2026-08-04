@@ -15,6 +15,63 @@ the implementation computes it.
 from __future__ import annotations
 
 import synthweave as sw
+from synthweave import _hash
+
+
+def test_seed_and_salt_stay_separated_in_the_hash_key():
+    """`#65 hash_key keeps seed and salt separated`.
+
+    `hash_key` joins the two with a NUL so that `(seed, salt)` maps to a key
+    injectively. Concatenate them bare and `(1, "23")` and `(12, "3")` become
+    the same hash stream: two draws the schema declared as independent return
+    identical values, everywhere, silently.
+
+    Tested at `_hash` rather than through a schema on purpose. Every salt the
+    library builds is prefixed by a literal (`table\\x00...`), so no schema a
+    user can write puts a digit boundary where the corruption shows. The
+    property is real, the public surface simply cannot express it, and the
+    alternative is what the harness found: an entry pinned by a dtype error
+    in an unrelated chunking test.
+    """
+    assert _hash.hash_key(1, "23") != _hash.hash_key(12, "3"), (
+        "seed and salt run together in the hash key, so (1, '23') and (12, '3') "
+        "share one derivation stream"
+    )
+    # The same argument one boundary along, so a fix that merely reorders the
+    # two halves does not pass.
+    assert _hash.hash_key("a", "bc") != _hash.hash_key("ab", "c")
+
+
+def test_an_unweighted_choice_reaches_every_value_it_was_given():
+    """`#65 unweighted pick() spreads over every value`.
+
+    An unweighted pick indexes `floor(u * len(values))`. Use `len(values) - 1`
+    instead and the last value becomes unreachable for any `u < 1`, while the
+    rest skew towards the front. Nothing about the output looks broken: it is
+    still deterministic, still chunk invariant, still drawn from the declared
+    set. Only one declared value has quietly stopped existing.
+
+    Asserted against the declared values and the uniform share they imply,
+    not against anything the module recomputes.
+    """
+    values = [f"v{i}" for i in range(10)]
+    person = sw.Entity("person", count=5_000, attributes={"pick": sw.Choice(values)})
+    table = sw.Table("t", grain=sw.PerEntity("person"), carry=["pick"])
+    schema = sw.Schema(entities=[person], tables=[table], seed=11)
+
+    drawn = sw.Pipeline(schema).run()["t"]["pick"]
+
+    missing = sorted(set(values) - set(drawn))
+    assert not missing, f"declared values never drawn at all: {missing}"
+    # 5,000 draws over 10 equally likely values puts each share at 0.10 with a
+    # standard error of 0.004, so 0.02 is five-plus sigma of slack. Dropping
+    # the last value alone moves every other share to 0.111.
+    share = drawn.value_counts(normalize=True)
+    worst = max(abs(share[v] - 0.1) for v in values)
+    assert worst < 0.02, (
+        f"an unweighted Choice is not uniform over its values (worst share off "
+        f"by {worst:.3f}):\n{share.sort_index()}"
+    )
 
 
 def test_normal_draws_have_the_requested_spread():

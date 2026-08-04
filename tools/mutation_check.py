@@ -695,10 +695,16 @@ MUTATIONS = [
     # "delete the guard" mutations: each one is the shape a real arithmetic
     # slip would take, which is what the existing entries did not cover.
     (
+        # Pinned (#156). This entry used to report CAUGHT on the strength of a
+        # dtype-narrowing ValueError in a chunk-shift test: the mutation moves
+        # every derived value in the library, so *something* somewhere was
+        # always going to notice, and nothing asserted the separation itself.
+        # One fixture edit away from MISSED, silently.
         "#65 hash_key keeps seed and salt separated",
         "src/synthweave/_hash.py",
         'return hashlib.sha256(f"{seed}\\x00{salt}".encode()).hexdigest()[:16]',
         'return hashlib.sha256(f"{seed}{salt}".encode()).hexdigest()[:16]',
+        ("tests/test_hash_invariants.py::test_seed_and_salt_stay_separated_in_the_hash_key",),
     ),
     (
         "#65 the salt reaches the hash key (independent draws per salt)",
@@ -725,10 +731,14 @@ MUTATIONS = [
         "    z = np.sqrt(-1.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
     ),
     (
+        # Pinned (#156). The sole catcher was a KeyError for an unmapped
+        # Census category, which is a test about a missing mapping and says
+        # nothing about whether a pick reaches every value it was given.
         "#65 unweighted pick() spreads over every value",
         "src/synthweave/_hash.py",
         "        idx = np.minimum((u * len(values)).astype(np.int64), len(values) - 1)",
         "        idx = np.minimum((u * (len(values) - 1)).astype(np.int64), len(values) - 1)",
+        ("tests/test_hash_invariants.py::test_an_unweighted_choice_reaches_every_value_it_was_given",),
     ),
     (
         "#65 weighted pick() normalizes the weights before the cumsum",
