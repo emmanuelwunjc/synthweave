@@ -53,6 +53,7 @@ identifiers are derived from (seed, entity, tag) rather than looked up.
 from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _installed_version
 
+from ._deprecation import SynthweaveDeprecationWarning
 from ._hash import derive_id
 from .context import RunContext
 from .fidelity import FidelityReport, fidelity_report
@@ -119,4 +120,6 @@ __all__ = [
     # extension
     "register", "unregister", "resolve", "available", "derive_id",
     "SchemaError",
+    # deprecation
+    "SynthweaveDeprecationWarning",
 ]

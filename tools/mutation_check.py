@@ -698,6 +698,17 @@ MUTATIONS = [
         "        return pd.DataFrame(columns=columns)",
         "        return pd.DataFrame(columns=sorted(columns))",
     ),
+    (
+        "#61 find_stack_level walks out of the package instead of guessing",
+        "src/synthweave/_deprecation.py",
+        """    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and _is_ours(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    return level""",
+        """    return 2""",
+    ),
 ]
 
 
