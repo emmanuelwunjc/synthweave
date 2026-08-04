@@ -210,8 +210,11 @@ MUTATIONS = [
     (
         "I13 empty table keeps its declared columns",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame()",
+        # `_concat`'s stand-in frame moved out to `Pipeline._empty_frame` with
+        # the #82 dtype fix. Same fix, same revert: hand back a frame with no
+        # columns and see whether the suite notices.
+        "        return empty\n",
+        "        return pd.DataFrame()\n",
     ),
     (
         "I14 identifier width vs population",
@@ -753,10 +756,13 @@ MUTATIONS = [
         '    if getattr(chunk, "_is_view", False):',
     ),
     (
+        # Retargeted 2026-08-04: #82 moved the empty-table build into
+        # `_empty_frame`, so the old snippet stopped matching and the entry went
+        # STALE. Same guarantee, same test, new line.
         "#65 an empty table keeps its declared column order, not a sorted one",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame(columns=sorted(columns))",
+        "            columns=columns,\n        )",
+        "            columns=sorted(columns),\n        )",
     ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
@@ -799,6 +805,56 @@ MUTATIONS = [
             else:
                 yield chunk
 """,
+    ),
+    (
+        "#61 find_stack_level walks out of the package instead of guessing",
+        "src/synthweave/_deprecation.py",
+        """    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and _is_ours(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    return level""",
+        """    return 2""",
+    ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
+    (
+        "#82 an empty table keeps the dtypes its rules declare",
+        "src/synthweave/pipeline.py",
+        """        return pd.DataFrame(
+            {
+                name: as_declared(rules[name], empty) if name in rules else empty
+                for name in columns
+            },
+            columns=columns,
+        )""",
+        "        return pd.DataFrame(columns=columns)",
     ),
 ]
 
