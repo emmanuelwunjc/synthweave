@@ -451,6 +451,16 @@ MUTATIONS = [
 """,
         "",
     ),
+    (
+        "#62 I33 the project root's own .env is read before the walk stops",
+        "src/synthweave/connectors/acs_pums.py",
+        """    for directory in (here, *here.parents):
+        candidate = directory / ".env\"""",
+        """    for directory in (here, *here.parents):
+        if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
+            break
+        candidate = directory / ".env\"""",
+    ),
 ]
 
 

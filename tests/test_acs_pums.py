@@ -147,6 +147,33 @@ def test_dotenv_lookup_stops_at_the_project_root(monkeypatch, tmp_path):
     assert urlopen.call_count == 0
 
 
+def test_dotenv_at_the_project_root_is_read_before_the_walk_stops(monkeypatch, tmp_path):
+    """The ordinary case: the repo root holds the marker *and* the `.env`.
+
+    The stop condition has to be checked after that directory's own `.env`,
+    not before. Reversing the two makes the walk end at the repo root without
+    reading the `.env` sitting in it, which is where every documented setup
+    puts the key ("a `.env` file at the repo root"). That would break the
+    normal path for everyone while the fix's own regression test stayed green.
+    """
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\n')
+    (tmp_path / ".env").write_text("CENSUS_API_KEY=root-key\n")
+    nested = tmp_path / "examples"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    captured = {}
+
+    def fake_urlopen(url, timeout=30):
+        captured["url"] = url
+        return _mock_response(json.dumps(PAYLOAD).encode())
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        fetch_pums(["AGEP", "PINCP"], state="36", cache_dir=None)
+
+    assert "key=root-key" in captured["url"]
+
+
 # --- state name/abbreviation shorthand -----------------------------------
 
 
