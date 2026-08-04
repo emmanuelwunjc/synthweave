@@ -698,6 +698,16 @@ MUTATIONS = [
         "        return pd.DataFrame(columns=columns)",
         "        return pd.DataFrame(columns=sorted(columns))",
     ),
+    # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
+    # exists for. Like every entry here the snippet is a literal snapshot, so a
+    # real bound change makes this STALE, which fails the run and points at the
+    # line to update. That is the intended way to find out, not a defect.
+    (
+        "N1 the Faker bound is single-sourced to pyproject.toml",
+        "pyproject.toml",
+        'pii = ["Faker>=20,<41"]',
+        'pii = ["Faker>=20,<42"]',
+    ),
 ]
 
 
