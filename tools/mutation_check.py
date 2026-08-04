@@ -97,6 +97,8 @@ MUTATIONS = [
         """        dtype = self.dtypes.get(column)
         if dtype is None or dtype == object:
             return values
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            return pd.array(values, dtype=dtype)
         return values.astype(dtype)""",
         """        return values""",
     ),
@@ -506,6 +508,12 @@ MUTATIONS = [
 """,
         """    if False:
 """,
+    ),
+    (
+        "#96.2 an ExtensionDtype is restored through pandas, not ndarray.astype",
+        "src/synthweave/stages/synthesize.py",
+        "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
+        "",
     ),
 ]
 
