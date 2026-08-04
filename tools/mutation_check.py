@@ -884,6 +884,22 @@ MUTATIONS = [
         "",
     ),
     (
+        # #134. The entry above deletes the whole ExtensionDtype block, so the
+        # null guard *inside* it never gets reverted on its own and nothing
+        # says whether it is load-bearing. It is: `pd.array` maps a value the
+        # dtype cannot hold to null where `astype` would have raised, so
+        # without this clause a `Typo` result outside a category's set
+        # disappears into a null and the column reads as clean -- the exact
+        # papering over `_restore_dtype` exists to refuse.
+        "#134 a cast that nulls a live value is a failed restore, not a clean column",
+        "src/synthweave/stages/noise.py",
+        """            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+""",
+        "",
+        ("tests/test_noise.py::test_typo_on_a_category_column_falls_back_to_object",),
+    ),
+    (
         "#82 an empty table keeps the dtypes its rules declare",
         "src/synthweave/pipeline.py",
         """        return pd.DataFrame(
