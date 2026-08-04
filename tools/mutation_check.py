@@ -570,6 +570,24 @@ MUTATIONS = [
         "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
         "",
     ),
+    (
+        # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
+        # that an entity's rows never straddle a boundary, and until #53 nothing
+        # asserted it. This entry breaks the guarantee in the shipped generator
+        # (one row, then the rest, so a chunk boundary lands inside the first
+        # entity) while leaving determinism, chunk invariance, the emitted
+        # columns and the row count untouched. Only the non-straddling check can
+        # notice, which is the point of logging it here.
+        "#53 generator chunks whole entities (non-straddling)",
+        "src/synthweave/stages/generate.py",
+        """            emitted += len(chunk)
+            yield chunk
+""",
+        """            emitted += len(chunk)
+            yield chunk.iloc[:1]
+            yield chunk.iloc[1:]
+""",
+    ),
 ]
 
 
