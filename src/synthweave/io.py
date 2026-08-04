@@ -39,7 +39,6 @@ class ChunkWriter:
         # directory of parts then got a schema that depended on whether that
         # partition happened to produce rows.
         self.empty = pd.DataFrame() if empty is None else empty
-        self.columns = list(self.empty.columns)
         self._writer = None
         self._wrote_header = False
         self._csv_columns: list[str] | None = None

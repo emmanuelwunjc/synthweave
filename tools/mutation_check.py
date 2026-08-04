@@ -975,7 +975,9 @@ MUTATIONS = [
         "#125 an empty table's Parquet file keeps the schema its rules declare",
         "src/synthweave/io.py",
         "        empty = self.empty\n",
-        "        empty = pd.DataFrame({name: pd.Series(dtype=object) for name in self.columns})\n",
+        "        empty = pd.DataFrame(\n"
+        "            {name: pd.Series(dtype=object) for name in self.empty.columns}\n"
+        "        )\n",
     ),
     # #137's occurrence half: the grain column loses its stand-in rule and goes
     # back to `object` on a zero-row run against `int64` populated.
