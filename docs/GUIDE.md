@@ -7,15 +7,17 @@ pitch for someone who already knows the vocabulary. This document is for
 anyone who does not, yet, and wants to understand every piece of syntax
 before writing their own schema.
 
-Three parts:
+Four parts:
 
 1. **Glossary** — what each word means, in plain English, before you see any code.
 2. **Syntax reference** — every function and class you can write, what each argument does, and what type it expects.
 3. **Tutorial** — building one config from nothing, step by step, adding one idea at a time.
+4. **The front door**: `sw.Mode`, a shorter way in once the pieces make sense.
 
 If a word confuses you while reading the tutorial, it is defined in the
 glossary. If you already know what you want to build and just need to look up
-one piece of syntax, skip to the reference.
+one piece of syntax, skip to the reference. If you want the shortest path to
+working output and are happy to come back for the details, skip to Part 4.
 
 ---
 
@@ -619,6 +621,196 @@ than something you chose deliberately or sourced from real data.
 
 ---
 
+## Part 4: The front door (`sw.Mode`)
+
+Everything above is the explicit form: you build the rules, the entities,
+the tables, and the pipeline yourself, and you wire the synthesizer and the
+noise config by hand. That is worth understanding, and it is what you will
+reach for when a schema gets specific.
+
+`sw.Mode` is a shorter way in for the common cases. It is sugar, not a
+wrapper: `entity()` and `table()` hand back real `sw.Entity` and `sw.Table`
+objects, and `schema().run()` runs a real `sw.Pipeline`. Nothing is hidden
+and nothing is locked away. What it saves you is the wiring.
+
+You pick a mode by what you are starting with:
+
+| You have | Mode | What it does |
+|---|---|---|
+| The numbers, but no rows | `sw.Mode.metadata()` | Builds rules. No model at all. |
+| A real microdata sample | `sw.Mode.real_data(source=...)` | Fits CART on your rows. |
+| Neither, but a place | `sw.Mode.scope(area_code=..., epsilon=...)` | Fetches a real population from ACS PUMS. |
+
+All three share the same four methods.
+
+### The four methods every mode has
+
+**`attribute(name, **kwargs)`** describes one column. What the keyword
+arguments mean depends on the mode (see below). Any of `missing_rate=`,
+`typo_rate=`, and `ocr_rate=` can be passed in *any* mode: they are recorded
+rather than applied, and become the matching `sw.Missing`/`sw.Typo`/`sw.OCR`
+noise ops on every table that carries that attribute. The rule you get back
+is clean; the mess is added at the end of the pipeline, as it always was.
+
+**`entity(name, count=, attributes=, identifiers=)`** is a plain
+`sw.Entity`, same arguments as the reference above.
+
+**`table(name, grain=, columns=, carry=, identifiers=, coverage=)`** is a
+plain `sw.Table`, same arguments as the reference above.
+
+**`schema(entities=, tables=, seed=)`** returns a small object with
+`.run()` and `.run_to(path, format=...)` on it, which build and run a real
+`sw.Pipeline` with the synthesizer and noiser the mode assembled for you.
+This is also where your noise rates are matched against the schema's real
+columns, once every table is known and `carry="*"` has been expanded.
+
+### What every mode refuses
+
+Failures are named, and they are named the same way in all three modes: a
+`ValueError` at the line you wrote, saying which attribute or column is at
+fault.
+
+- An unknown keyword to `attribute()` is rejected by name, in every mode. A
+  misspelled `missing_rate=` is a typo, not a silent no-op.
+- A noise rate declared for a column no table carries or generates raises at
+  the `schema()` call, naming the unmatched column.
+- A non-positive `epsilon` raises at the `real_data()`, `scope()`, or
+  `attribute()` call that set it, in both modes that take one. It is not
+  quietly clamped into a plausible-looking value.
+
+### `sw.Mode.metadata()`: you know the numbers
+
+`attribute()` here takes the shape of a distribution and gives you back a
+`Rule`:
+
+- `min=` and `max=` → `sw.Uniform(min, max)`
+- `mean=`, `sd=`, `distribution="normal"`, optional `min=`/`max=` as
+  clipping bounds → `sw.Normal(...)`
+- `values=`, optional `weights=` → `sw.Choice(values, weights)`
+
+Anything that does not resolve (e.g. `distribution="normal"` with no `sd=`)
+raises `ValueError` naming what is missing, at the `attribute()` call, before
+any generation work starts.
+
+```python
+import synthweave as sw
+
+m = sw.Mode.metadata()
+education = m.attribute("education", values=["HS", "College"], weights=[0.6, 0.4])
+income = m.attribute("income", mean=45_000, sd=12_000, distribution="normal",
+                     min=0, missing_rate=0.05)
+
+people = m.entity("person", count=2_000,
+                  attributes={"education": education, "income": income},
+                  identifiers=["tax_id"])
+roster = m.table("roster", grain="person", carry=["education", "income"],
+                 identifiers=["tax_id"])
+
+result = m.schema(entities=[people], tables=[roster], seed=42).run()
+print(result["roster"].head())
+print(result["roster"]["income"].isna().mean())   # about 0.05
+```
+
+### `sw.Mode.real_data(source=..., epsilon=...)`: you have real rows
+
+`source` is a `pandas.DataFrame`, or a path to a `.csv` or `.parquet` file.
+Any other extension raises `ValueError` naming the path. `attribute(name)`
+here needs no distribution: the column's values come from the donor rows,
+sampled the way `sw.CARTSynthesizer` samples them.
+
+**`epsilon` is not differential privacy.** There is no Laplace mechanism,
+no Gaussian mechanism, and no privacy accounting anywhere in this library.
+`epsilon` maps onto `sw.CARTSynthesizer`'s existing generalization
+controls (`max_depth`, `min_samples_leaf`, `fit_cap`), where a lower value
+fits shallower trees on fewer rows. That genuinely generalizes more and
+discloses less, which is worth having, but it is not a formal guarantee of
+anything and must not be reported as one. Set it per mode, or override it
+for a single column.
+
+```python
+import numpy as np
+import pandas as pd
+import synthweave as sw
+
+rng = np.random.default_rng(0)
+age = rng.integers(18, 85, size=2_000)
+sample = pd.DataFrame({"age": age,
+                       "income": np.clip(age * 900 + rng.normal(0, 8_000, 2_000), 0, None)})
+
+m = sw.Mode.real_data(source=sample, epsilon=1.0)
+a = m.attribute("age")
+i = m.attribute("income", epsilon=0.5)     # generalize this column harder
+
+people = m.entity("person", count=2_000, attributes={"age": a, "income": i})
+table = m.table("residents", grain="person", carry=["age", "income"])
+
+result = m.schema(entities=[people], tables=[table], seed=7).run()
+print(result["residents"].head())
+```
+
+Two attributes at the same `epsilon` are fitted by one synthesizer; two at
+different values get one each, since two generalization levels cannot be
+fitted as a single tree.
+
+### `sw.Mode.scope(area_code=..., epsilon=...)`: you have neither, but you have a place
+
+Fetches real (anonymized) ACS PUMS survey responses from the US Census
+Bureau and synthesizes from those, the same way `real_data` mode does with
+your own rows.
+
+**`area_code` locks to a US state and nothing finer.** The connector
+resolves state-level geography only: no county, no PUMA. `"NY"`,
+`"New York"`, and `"36"` all mean the same whole state.
+
+`attribute()` here requires `variable=`, the ACS variable code the column
+should be filled from. There is no name guessing: `"income"` will not be
+matched to `PINCP` for you, because a wrong guess would silently produce
+plausible data from the wrong column. A missing `variable=` raises
+`ValueError` naming the attribute.
+
+**`epsilon` is not differential privacy here either.** There is no Laplace
+mechanism, no Gaussian mechanism, and no privacy accounting anywhere in this
+library. It is the same knob as in `real_data` mode: `sw.CARTSynthesizer`'s
+generalization controls (`max_depth`, `min_samples_leaf`, `fit_cap`), where
+a lower value fits shallower trees on fewer rows. That generalizes more and
+discloses less, which is worth having, but it is not a formal guarantee of
+anything and must not be reported as one.
+
+It matters more here than it does with your own data, not less. The donor
+rows are real Census respondent records. Left at the synthesizer's unbounded
+defaults, a scope run would disclose more about those respondents than a
+`real_data` run discloses about rows you already hold. `epsilon` defaults to
+`1.0`, and `attribute(name, variable=..., epsilon=...)` overrides it for one
+column. The grouping rule is the same as `real_data`'s: columns at the same
+epsilon are fitted by one synthesizer, columns at different values get one
+each.
+
+```python
+import synthweave as sw
+
+m = sw.Mode.scope(area_code="NY", epsilon=1.0)
+age = m.attribute("age", variable="AGEP")
+income = m.attribute("income", variable="PINCP", epsilon=0.5)  # generalize this one harder
+
+people = m.entity("person", count=2_000, attributes={"age": age, "income": income})
+table = m.table("ny_residents", grain="person", carry=["age", "income"])
+
+result = m.schema(entities=[people], tables=[table], seed=3).run()
+print(result["ny_residents"].head())
+```
+
+The fetch happens once, for every scope attribute at the same time, and is
+cached on the mode, so a second `.run()` does not go back to the network.
+Needs a free Census API key as `CENSUS_API_KEY`. See the syntax reference
+entry for `fetch_pums` above.
+
+The same caveat from Step 7 applies here, and is worth repeating: an ACS
+sample for a state is *someone else's* population, not yours. Treat it as a
+stand-in for shape and plausibility, not as evidence about your actual
+target population.
+
+---
+
 ## Extending it
 
 Everything synthweave ships with (`CARTSynthesizer`, `Declared`/`Empirical`/`Prior`,
@@ -669,3 +861,4 @@ column is passed through exactly as drawn.
   explicit form throughout.
 - `examples/three_layers_data_availability.py` — Steps 5, 6, and 7 above,
   as one runnable script.
+- `examples/three_modes.py`: Part 4's three modes, as one runnable script.

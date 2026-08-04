@@ -44,7 +44,14 @@ _FIELDS = ("first_name", "first_name_female", "first_name_male", "last_name")
 
 # The Faker attributes read below are internals, not public API, so the shape
 # they are expected to have is stated here and checked at pool-build time.
-# Keep in step with the `Faker` bound in `pyproject.toml`.
+#
+# This mirrors the `Faker` bound declared by `pyproject.toml`'s extras, which
+# is the single source. It is a mirror rather than a runtime lookup because
+# `pyproject.toml` is not shipped in the wheel and installed distribution
+# metadata is written at install time, so neither is readable-and-current from
+# here. `tests/test_faker_bound_sync.py` is what makes the mirror safe: it
+# fails if this line and `pyproject.toml` ever disagree. Edit `pyproject.toml`
+# first and let that test tell you to come here.
 _FAKER_SUPPORTED = "Faker>=20,<41"
 
 _PROVIDER_ATTRS = {

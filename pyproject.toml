@@ -32,7 +32,12 @@ parquet = ["pyarrow>=12"]
 # (`Provider.first_names` and friends) for its frequency weights. No break is
 # known; the bound exists because a private attribute can change shape in any
 # release with no deprecation path. Raise it once a new major is checked
-# against `_checked_provider_pool`, and keep `_FAKER_SUPPORTED` in step.
+# against `_checked_provider_pool`.
+#
+# These two lines are the single source for the supported range. Bump them and
+# `tests/test_faker_bound_sync.py` will fail until `_FAKER_SUPPORTED` in
+# `src/synthweave/connectors/faker_names.py` follows, so the error message
+# users see cannot go on naming a range this file no longer declares.
 pii = ["Faker>=20,<41"]
 dev = ["pytest>=7", "pyarrow>=12", "pyflakes>=3", "Faker>=20,<41"]
 
