@@ -13,6 +13,7 @@
 # The front end lives in its own repo, github.com/emmanuelwunjc/synthweave-frontend.
 docs/*
 !docs/GUIDE.md
+!docs/MAP.md
 demo/
 CLAUDE.md
 

@@ -1,5 +1,7 @@
 # The synthweave guide: glossary, syntax reference, and tutorial
 
+*Looking for a different doc? [docs/MAP.md](MAP.md) is the index.*
+
 This is the plain-language companion to the README. The README is a quick
 pitch for someone who already knows the vocabulary. This document is for
 anyone who does not, yet, and wants to understand every piece of syntax
