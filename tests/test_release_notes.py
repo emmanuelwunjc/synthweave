@@ -8,6 +8,7 @@ is the case a naive parser silently drops.
 
 import importlib.util
 import pathlib
+import subprocess
 
 import pytest
 
@@ -192,3 +193,35 @@ def test_version_tags_are_ordered_numerically_not_as_strings():
     generate notes over a range that has already been released."""
     tags = ["v0.9.0", "v0.10.0"]
     assert release_notes.previous_tag(tags, "v1.0.0") == "v0.10.0"
+
+
+def _run(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_the_range_ignores_a_non_release_tag_on_the_release_commit(tmp_path, monkeypatch):
+    """`previous_tag` already filters non-release tags out of the *earlier*
+    side of the range. The current side needs the same filter: this repo
+    carries `archive/bug-hunt` and `wip/pre-worktree-split`, and a
+    `git describe --exact-match` that is allowed to return one of those makes
+    the release job die at the notes step, which sits before the PyPI publish.
+    A tag that has nothing to do with releasing then blocks a release.
+    """
+    _run(tmp_path, "init", "-q", "-b", "main")
+    # `.test` is an RFC 2606 reserved TLD, so this cannot be a real mailbox.
+    _run(tmp_path, "config", "user.email", "t@example.test")  # leak-guard: allow
+    _run(tmp_path, "config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("one\n")
+    _run(tmp_path, "add", "a.txt")
+    _run(tmp_path, "commit", "-qm", "feat: the first thing")
+    _run(tmp_path, "tag", "v0.1.0")
+    (tmp_path / "a.txt").write_text("two\n")
+    _run(tmp_path, "commit", "-qam", "fix: the second thing")
+    _run(tmp_path, "tag", "v0.2.0")
+    # A non-release tag sharing the release commit. `git describe` picks the
+    # tag whose refname sorts first, so `archive/bug-hunt` beats `v0.2.0`.
+    _run(tmp_path, "tag", "archive/bug-hunt")
+
+    monkeypatch.chdir(tmp_path)
+
+    assert release_notes._default_range() == "v0.1.0..v0.2.0"

@@ -41,6 +41,21 @@ def _job_blocks(workflow_text: str) -> list[str]:
     return re.split(r"\n(?=  [a-zA-Z][a-zA-Z0-9_-]*:\n)", "\n" + jobs_section)[1:]
 
 
+def _jobs_without_timeout(workflow_text: str) -> list[str]:
+    """Job ids in one workflow that declare no `timeout-minutes`.
+
+    Anchored at four spaces, the job-key level where `runs-on` lives. A
+    step's own `timeout-minutes` is indented deeper and bounds one step
+    rather than the job, so it must not count as the job having a cap.
+    """
+    missing = []
+    for block in _job_blocks(workflow_text):
+        job_id = re.match(r"  ([a-zA-Z][a-zA-Z0-9_-]*):\n", block).group(1)
+        if not re.search(r"^    timeout-minutes:\s*\d+\s*$", block, re.MULTILINE):
+            missing.append(job_id)
+    return missing
+
+
 def _gating_python_version() -> str:
     """The project's minimum supported interpreter, read from pyproject. That
     is the matrix leg branch protection waits on, so raising the floor has to
@@ -194,6 +209,52 @@ def test_matrix_without_the_gating_interpreter_is_an_error():
 
 def test_gating_interpreter_is_the_projects_minimum_supported_python():
     assert _gating_python_version() == "3.10"
+
+
+def test_a_job_without_timeout_minutes_is_detected():
+    """The rule as a property, on a workflow written here rather than on the
+    repo's own files, so the detector is proven independently of whatever
+    .github/workflows currently happens to contain.
+    """
+    workflow = (
+        "name: X\n"
+        "\njobs:\n"
+        "  capped:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 10\n"
+        "    steps:\n"
+        "      - run: true\n"
+        "\n"
+        "  uncapped:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: true\n"
+        "        timeout-minutes: 5\n"
+    )
+    assert _jobs_without_timeout(workflow) == ["uncapped"]
+
+
+def test_every_workflow_job_declares_a_timeout():
+    """A job with no `timeout-minutes` runs to GitHub's six-hour default. With
+    branch protection on `strict: true`, one hung required job stalls the
+    whole merge queue for six hours, since every queued PR must be up to date
+    with `main` and cannot get there while the queue is blocked.
+
+    PR #72 added timeouts to the four jobs that existed then and wrote the
+    rule down in prose. `test-pandas3` was added afterwards without one, and
+    became a required check in PR #111. Prose is not a mechanism; this is.
+    """
+    missing = {}
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        jobs = _jobs_without_timeout(path.read_text())
+        if jobs:
+            missing[path.name] = jobs
+    assert not missing, (
+        f"these workflow jobs declare no `timeout-minutes`: {missing!r}. "
+        "Without one a hang runs for GitHub's six-hour default, and a "
+        "required check that hangs blocks every merge in the queue for that "
+        "whole time. Add a `timeout-minutes:` matching the sibling jobs."
+    )
 
 
 def test_documented_required_checks_match_actual_ci_jobs():

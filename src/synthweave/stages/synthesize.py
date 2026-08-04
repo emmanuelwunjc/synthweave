@@ -322,6 +322,14 @@ class CARTSynthesizer:
         fit_cap: maximum rows to fit on. Below this, every row is used.
         max_depth, min_samples_leaf: tree controls. Shallow trees generalize
             more and disclose less.
+        label: distinguishes this synthesizer from another one applied to the
+            same table, in the provenance paths and the run report. Unset (the
+            default) keeps the plain `{table}.synth.*` paths. `Mode` sets it
+            per epsilon group: several synthesizers reach one table there, and
+            without a label they all wrote the same paths and the same report
+            key, so every group's config but one was silently overwritten and
+            the audit trail claimed one generalization level where two were
+            applied.
     """
 
     def __init__(
@@ -335,11 +343,13 @@ class CARTSynthesizer:
         fit_cap: int | Any = None,
         max_depth: int | None = None,
         min_samples_leaf: int | Any = 5,
+        label: str | None = None,
     ):
         if not columns:
             raise ValueError("CARTSynthesizer needs at least one column to synthesize")
         self.columns = list(columns)
         self.tables = set(tables) if tables is not None else None
+        self.label = label
         self.predictors = list(predictors)
         self.numeric = set(numeric)
         self.structure = _coerce_structure(structure)
@@ -405,13 +415,19 @@ class CARTSynthesizer:
             yield from chunks
             return
 
-        cap = ctx.provenance.add(f"{table.name}.synth.fit_cap", self.fit_cap)
+        # Everything this run records about itself hangs off one prefix, so a
+        # second synthesizer on the same table can be told apart rather than
+        # overwriting the first (#145).
+        prefix = f"{table.name}.synth" + (f".{self.label}" if self.label else "")
+        stage = "synthesize" + (f".{self.label}" if self.label else "")
+
+        cap = ctx.provenance.add(f"{prefix}.fit_cap", self.fit_cap)
         if self.numeric:
             ctx.provenance.add(
-                f"{table.name}.synth.numeric",
+                f"{prefix}.numeric",
                 modeled(sorted(self.numeric), "columns declared numeric by the user"),
             )
-        leaf = ctx.provenance.add(f"{table.name}.synth.min_samples_leaf", self.min_samples_leaf)
+        leaf = ctx.provenance.add(f"{prefix}.min_samples_leaf", self.min_samples_leaf)
 
         train = self.structure.training_frame(table, ctx)
         replay: list[pd.DataFrame] = []
@@ -456,7 +472,7 @@ class CARTSynthesizer:
 
         ctx.report(
             table.name,
-            "synthesize",
+            stage,
             fit_rows=len(train),
             fit_cap=cap,
             sampled=sampled,
