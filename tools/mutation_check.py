@@ -570,6 +570,22 @@ MUTATIONS = [
         "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
         "",
     ),
+    (
+        "#81 Typo corrupts a value whose script has no keyboard map",
+        "src/synthweave/stages/noise.py",
+        """            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
+""",
+        """            if not options:
+                out[i] = text
+                continue
+            repl = options[j % len(options)]
+            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+""",
+    ),
 ]
 
 

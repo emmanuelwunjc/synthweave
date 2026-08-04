@@ -94,7 +94,32 @@ class Missing(NoiseOp):
 
 
 class Typo(NoiseOp):
-    """Replaces one character with a keyboard neighbour."""
+    """Mistypes one character: a keyboard slip, or a slip of the fingers.
+
+    A keyboard slip needs a layout, and `_KEYBOARD` only knows a Latin one.
+    The character picked for corruption used to be looked up there and the
+    row left untouched when it had no neighbour, which for a value written
+    entirely in a script the map does not cover (CJK, Greek, Cyrillic) is not
+    a reduced rate but zero corruption, on every row of every run, while the
+    reported realized rate still claimed the configured one. The declared
+    rate is a promise, so silently under-delivering it is worse than the
+    missing map.
+
+    Filling the map in for every script is the wrong repair twice over: it is
+    unbounded, and key adjacency is not how those scripts are typed in the
+    first place (a CJK value is composed through an IME, not struck key by
+    key). What is script-agnostic is the *other* everyday typo, the fingers
+    arriving out of order or twice:
+
+    - transposition, swapping the picked character with its neighbour;
+    - duplication, when transposition would not change anything (a
+      one-character value, or two identical characters side by side).
+
+    A keyboard slip is still preferred wherever the layout knows the
+    character, so Latin-script corruption is byte-for-byte what it was.
+    Empty and null values are still passed through: there is no character to
+    mistype, and `Missing` already owns the null case.
+    """
 
     def corrupt(self, values, keys, seed, salt):
         pos = _hash.unit(keys, seed, f"{salt}\x00pos")
@@ -107,12 +132,28 @@ class Typo(NoiseOp):
             j = min(int(pos[i] * len(text)), len(text) - 1)
             ch = text[j]
             options = _KEYBOARD.get(ch.lower())
-            if not options:
-                out[i] = text
-                continue
-            repl = options[j % len(options)]
-            out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            if options:
+                repl = options[j % len(options)]
+                out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
+            else:
+                out[i] = _slip(text, j)
         return out
+
+
+def _slip(text: str, j: int) -> str:
+    """Mistype character `j` without knowing what script it is written in.
+
+    Swap it with the character next to it, preferring the one on the right so
+    a mid-word slip reads the way a real one does. Two identical characters
+    swap to themselves and a one-character value has nothing to swap with, so
+    those double the character instead: a repeat is as ordinary a typo as a
+    transposition, and it is the only other corruption that needs no map.
+    """
+    for k in (j + 1, j - 1):
+        if 0 <= k < len(text) and text[k] != text[j]:
+            lo, hi = min(j, k), max(j, k)
+            return text[:lo] + text[hi] + text[lo] + text[hi + 1 :]
+    return text[:j] + text[j] + text[j:]
 
 
 class OCR(NoiseOp):
