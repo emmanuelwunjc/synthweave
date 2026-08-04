@@ -75,15 +75,16 @@ trusting it. A test that cannot fail is not coverage.
   Short-lived: hours or days, not weeks.
 - [Conventional Commits](https://www.conventionalcommits.org/) for subjects:
   `type(scope): description`, where type is `feat`, `fix`, `chore`, `docs`,
-  `refactor`, `test`, or `perf`. The body explains *why*, not *what*.
+  `refactor`, `test`, `perf`, `ci`, or `build`. The body explains *why*, not
+  *what*.
 - One logical change per commit and per PR. Keep PRs to a few hundred lines
   across a handful of files. Pushing back on an oversized PR is correct.
 - PRs squash-merge, so the PR title becomes the commit on `main` and appears
   verbatim in the generated release notes. Write it accordingly.
 
-Required checks: `test (3.10)`, `pre-commit`, `mutation-check`,
-`conventional`. Branch protection blocks merging until they pass, and a PR
-must be up to date with `main` first.
+Required checks: `test (3.10)`, `test-pandas3`, `pre-commit`,
+`mutation-check`, `conventional`. Branch protection blocks merging until they
+pass, and a PR must be up to date with `main` first.
 
 Never push directly to `main`. Branch protection blocks it for everyone
 except repo admins, but the rule holds regardless of who is technically able
@@ -144,7 +145,7 @@ appends to `MUTATIONS`. **Append at the end of the list, never in the
 middle**, so a conflict resolves as one mechanical hunk instead of a
 semantic merge. Merge those PRs one at a time.
 
-**`src/synthweave/__init__.py` is shared and load-bearing** — it is the
+**`src/synthweave/__init__.py` is shared and load-bearing.** It is the
 public API surface. Say so in the PR title if you touch it, and expect to
 serialise with anything else that does.
 
