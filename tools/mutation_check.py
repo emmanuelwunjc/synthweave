@@ -716,14 +716,28 @@ MUTATIONS = [
         # entity) while leaving determinism, chunk invariance, the emitted
         # columns and the row count untouched. Only the non-straddling check can
         # notice, which is the point of logging it here.
+        #
+        # The `len(chunk) > 1` guard is what keeps that true. Splitting
+        # unconditionally makes `chunk.iloc[1:]` empty for a one-row chunk,
+        # which is a *second* broken invariant (line 63 above refuses to emit an
+        # empty chunk) and one that crashes three tests in `test_pipeline.py`
+        # and `test_synthesis_and_plugins.py` on `ValueError: zero-size array to
+        # reduction operation maximum`. Those reds say nothing about
+        # straddling, and they are enough on their own to report this entry
+        # CAUGHT with the whole non-straddling clause deleted, which would make
+        # the entry worthless as evidence for the thing it names. That is the
+        # #19 trap: plausible, green, proving nothing.
         "#53 generator chunks whole entities (non-straddling)",
         "src/synthweave/stages/generate.py",
         """            emitted += len(chunk)
             yield chunk
 """,
         """            emitted += len(chunk)
-            yield chunk.iloc[:1]
-            yield chunk.iloc[1:]
+            if len(chunk) > 1:
+                yield chunk.iloc[:1]
+                yield chunk.iloc[1:]
+            else:
+                yield chunk
 """,
     ),
 ]
