@@ -129,6 +129,9 @@ def test_pii_shapes_are_caught_in_a_data_shaped_file(line):
         # value bound waved both of these through.
         "API_KEY=abc123def456ghi7",  # leak-guard: allow (fixture)
         "password: correcthorsebatterystaple",  # leak-guard: allow (fixture)
+        # .json and .yaml are both scanned suffixes, and in both the name is
+        # quoted, so the `=`/`:` does not follow the identifier directly.
+        '  "aws_secret_access_key": "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",',  # leak-guard: allow (fake AWS example key from AWS' own docs)
     ],
 )
 def test_compound_credential_names_are_caught(line):

@@ -96,7 +96,11 @@ _CREDENTIAL_VALUE = (
     r"[\"']?(?:(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{12,}|[A-Za-z0-9_\-]{20,})"
 )
 
-_CREDENTIAL = r"(?i)" + _CREDENTIAL_NAME + r"\s*[=:]\s*" + _CREDENTIAL_VALUE
+# The separator. `.json` and `.yaml` are both scanned suffixes, and in both
+# the name is quoted, so the `:` does not follow the identifier directly.
+_CREDENTIAL_SEPARATOR = r"[\"']?\s*[=:]\s*"
+
+_CREDENTIAL = r"(?i)" + _CREDENTIAL_NAME + _CREDENTIAL_SEPARATOR + _CREDENTIAL_VALUE
 
 
 # Shapes that are never legitimate anywhere, including in the package. A
