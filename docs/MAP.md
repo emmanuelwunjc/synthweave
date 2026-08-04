@@ -54,7 +54,7 @@ docs/
   GUIDE.md                         glossary + API reference + tutorial  tracked
   AUTOPILOT.md                     agent dispatch: read first, stop there  untracked
   HANDOFF.md                       point-in-time session state/hazards   untracked
-  ISSUES.md                        narrative bug-postmortem log (I1-I40) untracked
+  ISSUES.md                        narrative bug-postmortem log (I-numbered) untracked
   NEXT_STEPS.md                    backlog, ~70% stale, folding into BLUEPRINT  untracked
   brainstorms/                     original scope/requirements decisions  untracked
   specs/                           v0.1 product spec + bug-hunt spec      untracked
@@ -92,10 +92,11 @@ issue #57 ("Tracking: documentation consistency") unless noted otherwise.
 - **The 2026-08-02 mutation-harness incident** (a concurrent `git checkout`
   aborting a running `tools/mutation_check.py`, and the reverted snippet
   getting committed as if it were real code) is told nearly verbatim in
-  three places: `docs/AUTOPILOT.md`'s stop banner, `docs/HANDOFF.md`'s
-  "Live state" section, and `~/CLAUDE.md`'s "Concurrent sessions" section.
-  Same anecdote, same causal chain, same remediation, restated three times
-  with no link between them.
+  four places: `CONTRIBUTING.md`'s "Working in parallel" section (the only
+  public one, added by PR #100), `docs/AUTOPILOT.md`'s stop banner,
+  `docs/HANDOFF.md`'s "Live state" section, and the machine-level agent
+  instructions outside this repo. Same anecdote, same causal chain, same
+  remediation, restated four times with no link between them.
 
 None of the above is a contradiction -- each file's own content is internally
 correct. The gap is that the *relationship* between them is only partly

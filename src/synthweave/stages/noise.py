@@ -223,7 +223,11 @@ class Noise:
                         f"which does not exist; available: {sorted(chunk.columns)}"
                     )
                 original_dtype = chunk[column].dtype
-                values = chunk[column].to_numpy(dtype=object)
+                # copy=True is required: under pandas 3 copy-on-write, to_numpy on a
+                # column that is already object dtype hands back a read-only view, so
+                # the `values[hit] = ...` write below raises. It has no observable
+                # effect on pandas 2, so the test-pandas3 CI job is its only guard.
+                values = chunk[column].to_numpy(dtype=object, copy=True)
                 for op in ops:
                     salt = f"noise\x00{table.name}\x00{column}\x00{op.name}"
                     rate = ctx.provenance.add(
