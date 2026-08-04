@@ -586,6 +586,17 @@ MUTATIONS = [
             out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
 """,
     ),
+    (
+        "I41 a noised ExtensionDtype column keeps its dtype",
+        "src/synthweave/stages/noise.py",
+        """        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
+""",
+        "",
+    ),
 ]
 
 

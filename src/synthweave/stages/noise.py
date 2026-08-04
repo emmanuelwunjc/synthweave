@@ -218,12 +218,33 @@ def _restore_dtype(values: np.ndarray, dtype: Any) -> np.ndarray | pd.api.extens
     numeric type. `Typo`/`OCR` replace a value with different text, which is
     a real type change, not noise to paper over; the cast below fails for
     that case and the column is left as object, as it must be.
+
+    `ndarray.astype` speaks numpy dtypes only, so a pandas ExtensionDtype
+    (`category`, nullable `Int64`, and every text column under pandas 3)
+    raises there rather than converting, and the column fell back to object
+    even when the values allowed the dtype: a `category` column that a
+    `Missing` pass had emptied came back as `object`, contradicting the
+    promise above. Those go through `pd.array`, the same restore
+    `CARTSynthesizer._restore` uses, rather than a second special case per
+    dtype the way `Int64` alone once was.
+
+    One difference from `astype` has to be undone here, though. Where
+    `astype` rejects a value the dtype cannot hold, `pd.array` maps it to
+    null: a `Typo` result outside a category's set would disappear into a
+    null and the column would read as clean. That is exactly the papering
+    over this function refuses to do, so a cast that nulls a value that was
+    not already null is treated as the failure `astype` would have raised.
     """
     if dtype == object:
         return values
     try:
         if any(v is None for v in values) and pd.api.types.is_integer_dtype(dtype):
             return pd.array(values, dtype="Int64")
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            restored = pd.array(values, dtype=dtype)
+            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+            return restored
         return values.astype(dtype)
     except (TypeError, ValueError):
         return values

@@ -142,3 +142,69 @@ def test_a_latin_typo_is_still_a_keyboard_slip(schema):
         assert after[i].lower() in neighbours[before[i].lower()], (
             f"{before!r} -> {after!r}: {after[i]!r} is not a keyboard neighbour of {before[i]!r}"
         )
+def test_missing_on_a_category_column_stays_categorical(people):
+    """A column of only nulls still allows a categorical dtype.
+
+    `_restore_dtype` promises the original dtype back where the values still
+    allow it, but only `Int64` was special-cased, so a `category` column came
+    back as `object` after a null-only `Missing` pass. Fed through a custom
+    generator because no built-in stage emits a categorical column.
+    """
+
+    @sw.register("generator", "test-categorical", overwrite=True)
+    class CategoricalRows:
+        def emit(self, table, ctx):
+            yield pd.DataFrame(
+                {
+                    "_sw_entity": [f"person:{i}" for i in range(6)],
+                    "_sw_row": [f"r{i}" for i in range(6)],
+                    "grade": pd.Series(list("ABCABC"), dtype="category"),
+                }
+            )
+
+    table = sw.Table("t", grain=sw.PerEntity("person"))
+    schema = sw.Schema(entities=[people], tables=[table], seed=1)
+
+    raw = sw.Pipeline(schema, generator="test-categorical").run()["t"]
+    assert str(raw["grade"].dtype) == "category"
+
+    out = sw.Pipeline(
+        schema,
+        generator="test-categorical",
+        noiser=sw.Noise({"t": {"grade": [sw.Missing(1.0)]}}),
+    ).run()["t"]
+
+    assert out["grade"].isna().all()
+    assert str(out["grade"].dtype) == "category"
+
+
+def test_typo_on_a_category_column_falls_back_to_object(people):
+    """Restoring an ExtensionDtype must not paper over a real value change.
+
+    `pd.array` maps a value a `category` cannot hold to null rather than
+    raising, unlike `astype`. Without a guard, a corrupted value would vanish
+    into a null and the column would look clean.
+    """
+
+    @sw.register("generator", "test-categorical", overwrite=True)
+    class CategoricalRows:
+        def emit(self, table, ctx):
+            yield pd.DataFrame(
+                {
+                    "_sw_entity": [f"person:{i}" for i in range(6)],
+                    "_sw_row": [f"r{i}" for i in range(6)],
+                    "grade": pd.Series(["aa"] * 6, dtype="category"),
+                }
+            )
+
+    table = sw.Table("t", grain=sw.PerEntity("person"))
+    schema = sw.Schema(entities=[people], tables=[table], seed=1)
+
+    out = sw.Pipeline(
+        schema,
+        generator="test-categorical",
+        noiser=sw.Noise({"t": {"grade": [sw.Typo(1.0)]}}),
+    ).run()["t"]
+
+    assert out["grade"].notna().all()
+    assert (out["grade"] != "aa").all()
