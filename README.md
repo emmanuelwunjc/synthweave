@@ -130,13 +130,13 @@ lets two tables generated years apart still link correctly with no lookup table
 involved.
 
 <details>
-<summary>One caveat for the statistically minded</summary>
+<summary>How far the determinism guarantee reaches</summary>
 
-The model-fitting step uses scikit-learn's decision trees, which do not take an
-explicit seed from synthweave. This has never produced observed
-non-determinism, but unlike everything else here it is not derived from the seed
-by construction. Worth knowing if you rely on bit-for-bit reproducibility as a
-hard guarantee rather than an extremely well-tested one.
+All the way, including model fitting. scikit-learn's decision trees are given a
+`random_state` derived from the run seed and the name of the column being
+fitted, so even a tie-break between two equally good splits reproduces. Nothing
+in synthweave draws from an unseeded source. Bit-for-bit reproducibility is a
+guarantee, not an observation.
 
 </details>
 
