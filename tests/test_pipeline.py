@@ -274,6 +274,13 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     A row-wise function alone cannot show that, because it has no chunk-level
     state to get wrong. So this test also runs an aggregate rate function, the
     exact shape the docstring warns about, and requires it to be refused.
+
+    Both guarantees are true of a column nothing happened to, so they are
+    asserted about an output first shown to be non-trivial: the rate has to
+    have varied by row, or two identical clean runs and two identical clean
+    chunkings prove only that the noiser did nothing, twice. A rate function
+    quietly collapsed to a flat rate keeps every assertion below green
+    otherwise, which is what this test used to allow.
     """
     table = sw.Table(
         "survey",
@@ -285,13 +292,30 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     noiser = sw.Noise(
         {"survey": {"amount": [sw.Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))]}}
     )
+
+    # 400 entities, so the bounds are wide on purpose: the declared rates are
+    # 0.30 and 0.05 and 3 sigma is about 9 and 5 points. This asks only that
+    # the rate is a function of the row, not that it is precisely realized,
+    # which `test_missingness_rate_can_vary_by_row` pins at 20,000 entities.
+    blank = (
+        sw.Pipeline(schema, chunk_size=invariants.SPLIT, noiser=noiser)
+        .run()["survey"]
+        .groupby("education")["amount"]
+        .apply(lambda s: s.isna().mean())
+    )
+    assert blank["HS"] > 0.20, f"HS rows were barely blanked: {blank.to_dict()}"
+    assert blank["College"] < 0.12, f"College rows were over-blanked: {blank.to_dict()}"
+
     invariants.assert_deterministic(schema, noiser=noiser)
     invariants.assert_chunk_invariant(schema, noiser=noiser)
 
     aggregate = sw.Noise(
         {"survey": {"amount": [sw.Missing(lambda f: float((f["education"] == "HS").mean()))]}}
     )
-    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+    # Matched on the reason, not just the path: a ValueError raised for some
+    # unrelated complaint about the same column would otherwise read as the
+    # chunk-derived rate being refused.
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing must return one rate per row"):
         sw.Pipeline(schema, chunk_size=7, noiser=aggregate).run()
 
 
@@ -774,6 +798,60 @@ def test_a_table_that_emits_no_rows_still_has_its_columns():
     assert list(empty.columns) == list(non_empty.columns)
 
 
+def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
+    """A zero-row run must not change a table's types, only its length.
+
+    Whether a run produced rows is a property of the data, not of the schema,
+    so a caller writing the result to Parquet must get the same schema either
+    way. `pd.DataFrame(columns=...)` types every column `object`, which turns
+    a coverage gap into a schema change that a downstream reader sees as a
+    different table.
+
+    `score` is the load-bearing column: it is the only one whose declared type
+    (`int64`) differs from the `object` an empty frame defaults to, so a test
+    without it cannot tell the two apart.
+
+    The claim is limited to the columns whose rule names a type, and the limit
+    is real rather than an oversight. A rule that declares nothing (an
+    identifier, a `Choice` over strings) leaves the populated case's type to
+    pandas' inference over the values, and zero rows offer nothing to infer
+    from. pandas 3 makes that visible: it reads a populated text column as
+    `str` and an empty object column as `object`, and no amount of care in the
+    empty branch can guess the first from the second.
+    """
+    person = sw.Entity(
+        "person",
+        count=5,
+        attributes={"education": sw.Choice(["HS", "College"], [0.6, 0.4])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    columns = {"score": sw.Integer(0, 100), "weight": sw.Uniform(0.0, 1.0)}
+    empty_table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns=columns,
+        coverage=0.001,
+    )
+    non_empty_table = sw.Table(
+        "t",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        identifiers=["tax_id"],
+        columns=columns,
+    )
+    empty = sw.Pipeline(sw.Schema(entities=[person], tables=[empty_table], seed=4)).run()["t"]
+    non_empty = sw.Pipeline(
+        sw.Schema(entities=[person], tables=[non_empty_table], seed=4)
+    ).run()["t"]
+
+    assert len(empty) == 0 and len(non_empty) > 0
+    assert [empty[c].dtype for c in columns] == [non_empty[c].dtype for c in columns], (
+        f"empty {empty.dtypes.to_dict()} vs non-empty {non_empty.dtypes.to_dict()}"
+    )
+
+
 # --- edge cases that turned out to be sound ---------------------------------
 
 
@@ -799,22 +877,137 @@ def test_typos_leave_missing_values_alone(many_people):
     assert not any("None" in v for v in written)
 
 
-def test_typo_corrupts_non_ascii_values_without_breaking(people):
-    """Character indexing must be by character, not by byte."""
+NON_ASCII_NAMES = ["北京市", "Ünüver", "Ωμέγα"]
+
+
+def _typo_pairs(rate: float = 0.5) -> list[tuple[str, str]]:
+    """(original, corrupted) for every row of a non-ASCII column.
+
+    The clean run is the oracle. Noise changes values and nothing else, so the
+    two runs line up row for row, which is what makes "this value was changed,
+    and here is what it was" answerable at all. Asserting on the noised column
+    alone can only ask whether some value somewhere differs from the declared
+    set, which is the weakness this replaces.
+    """
     entity = sw.Entity(
         "person",
         count=200,
-        attributes={"name": sw.Choice(["北京市", "Ünüver", "Ωμέγα"], [0.34, 0.33, 0.33])},
+        attributes={"name": sw.Choice(NON_ASCII_NAMES, [0.34, 0.33, 0.33])},
         identifiers=[sw.Identifier("tax_id")],
     )
     table = sw.Table("t", grain=sw.PerEntity("person"), carry=["name"])
-    result = sw.Pipeline(
-        sw.Schema(entities=[entity], tables=[table], seed=1),
-        noiser=sw.Noise({"t": {"name": [sw.Typo(0.5)]}}),
-    ).run()["t"]
+    schema = sw.Schema(entities=[entity], tables=[table], seed=1)
+    clean = sw.Pipeline(schema).run()["t"]["name"]
+    dirty = sw.Pipeline(schema, noiser=sw.Noise({"t": {"name": [sw.Typo(rate)]}})).run()["t"]["name"]
+    assert dirty.notna().all()
+    return list(zip(clean, dirty))
 
-    assert result["name"].notna().all()
-    assert (~result["name"].isin(["北京市", "Ünüver", "Ωμέγα"])).any()
+
+def _corrupted_share(pairs: list[tuple[str, str]], value: str) -> float:
+    rows = [(c, d) for c, d in pairs if c == value]
+    assert rows, f"no row held {value!r}, so nothing about it was tested"
+    return sum(c != d for c, d in rows) / len(rows)
+
+
+def _single_character_mistype(original: str, corrupted: str) -> str | None:
+    """Name the one-character mistype turning `original` into `corrupted`.
+
+    There are exactly three ways to mistype one character, and `Typo` is
+    allowed all three: strike the wrong key (substitution), strike two keys in
+    the wrong order (transposition), or strike one twice (duplication). The
+    keyboard-map path only ever produces the first; the map-free fallback for
+    scripts the layout does not cover produces the other two.
+
+    `None` means the value was not mistyped, it was mangled, which is what
+    byte-oriented indexing produces: slicing or re-decoding a multi-byte
+    character scrambles the characters around it rather than mistyping one.
+    Naming the edit rather than counting differing positions is what lets this
+    stay a real oracle across both paths instead of being relaxed to
+    "something changed".
+    """
+    if len(corrupted) == len(original):
+        differing = [i for i, (a, b) in enumerate(zip(original, corrupted)) if a != b]
+        if len(differing) == 1:
+            return "substitution"
+        if len(differing) == 2 and differing[1] == differing[0] + 1:
+            i, j = differing
+            if (corrupted[i], corrupted[j]) == (original[j], original[i]):
+                return "transposition"
+        return None
+    if len(corrupted) == len(original) + 1:
+        for i in range(len(corrupted)):
+            if corrupted[:i] + corrupted[i + 1 :] != original:
+                continue
+            adjacent = {corrupted[k] for k in (i - 1, i + 1) if 0 <= k < len(corrupted)}
+            if corrupted[i] in adjacent:
+                return "duplication"
+    return None
+
+
+def test_typo_corrupts_non_ascii_values_without_breaking():
+    """Character indexing must be by character, not by byte.
+
+    Two separate claims, and the old assertion (`(~isin(names)).any()`) made
+    neither. A single changed row out of 400 satisfied it, and it could not
+    look at *how* a value changed, only that it was no longer one of three
+    literals -- which is exactly what mojibake also looks like.
+
+    So: a value is corrupted at a real rate, and a corrupted value is the same
+    string with exactly one character mistyped. The second claim is asserted
+    through `_single_character_mistype`, which names the edit rather than
+    counting differing positions. Counting was wrong twice over: it hardcoded
+    the keyboard-map path's substitution as the only legal edit, so the #81
+    fix for scripts the layout does not cover (transposition, and duplication
+    when a transposition would change nothing) would turn this red for
+    behaviour that is correct. Naming the edit keeps the oracle exact under
+    both paths, and mojibake is still none of the three.
+
+    `Ünüver` is the value used here because it is the only one this can
+    currently assert a corruption rate for. That is #81, not a property of
+    the test: `Typo` cannot corrupt a value with no Latin characters at all,
+    which `test_typo_corrupts_a_value_with_no_latin_characters` pins.
+    """
+    pairs = _typo_pairs()
+
+    changed = [(c, d) for c, d in pairs if c != d]
+    for original, corrupted in changed:
+        assert _single_character_mistype(original, corrupted) is not None, (
+            f"{original!r} became {corrupted!r}, which is no one-character mistype "
+            f"of it: {len(original)} characters became {len(corrupted)} and the "
+            f"result is neither a substitution, a transposition nor a duplication, "
+            f"so the value was indexed by byte rather than by character"
+        )
+
+    # ~0.4 in practice: half the rows are eligible and two of `Ünüver`'s six
+    # characters have no keyboard neighbour. The bound only has to be well
+    # above "one row of 200 happened to change".
+    assert _corrupted_share(pairs, "Ünüver") > 0.2, (
+        f"only {_corrupted_share(pairs, 'Ünüver'):.1%} of 'Ünüver' rows were corrupted"
+    )
+
+
+@pytest.mark.xfail(
+    reason="#81: Typo picks one position uniformly, then finds no keyboard neighbour "
+    "for it, so a value with no Latin characters is never corrupted at all",
+    strict=False,
+)
+def test_typo_corrupts_a_value_with_no_latin_characters():
+    """The half of the claim above that `Ünüver` cannot make.
+
+    `Ünüver` still contains `n`, `v`, `e` and `r`, so a `Typo` that had lost
+    every trace of non-Latin handling would go on corrupting it and the test
+    above would stay green. A value made entirely of CJK or Greek characters
+    is the one that cannot be corrupted by accident.
+
+    Written against the behaviour `Typo` claims rather than against today's
+    output, so it turns from xfail to xpass when #81 is fixed. Delete the
+    marker then.
+    """
+    pairs = _typo_pairs()
+    for value in ("北京市", "Ωμέγα"):
+        assert _corrupted_share(pairs, value) > 0.2, (
+            f"{_corrupted_share(pairs, value):.1%} of {value!r} rows were corrupted"
+        )
 
 
 def test_sequential_derives_a_column_from_another(people):

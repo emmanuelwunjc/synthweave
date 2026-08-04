@@ -64,6 +64,8 @@ EXPECTED = (
     # extension
     "register", "unregister", "resolve", "available", "derive_id",
     "SchemaError",
+    # deprecation
+    "SynthweaveDeprecationWarning",
 )
 
 # Bound as a side effect of `from .schema import ...` and friends. Asserted
