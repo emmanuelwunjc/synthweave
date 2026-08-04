@@ -38,13 +38,14 @@ jobs:
       # not actually in this command until 2026-08-02.
       - run: PYTHONPATH=src python3 -m pyflakes src/ tests/ tools/ $([ -d examples ] && echo examples/)
 
-  # A signal for the pandas 3 compatibility work, not a gate: this installs
-  # the latest pandas 3.x over the pinned dependency and reports whether the
-  # suite passes against it, without blocking merges on a fix that is
-  # deliberately out of scope here (tracked separately).
+  # A gate, as of #107, which fixed the last of the pandas 3 failures. This
+  # installs the latest pandas 3.x over the pinned dependency and runs the
+  # suite against it. It is the only check that can see a whole class of
+  # regression: the pinned pandas 2 suite passes either way. Concretely,
+  # reverting `copy=True` in `src/synthweave/stages/noise.py` leaves the
+  # pandas 2 suite fully green, so nothing but this job guards that fix.
   test-pandas3:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
