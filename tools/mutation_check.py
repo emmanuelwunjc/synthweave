@@ -4,17 +4,27 @@ A fix with no test that catches its absence is not locked down. Each revert is
 applied to a throwaway copy of the checkout, the suite runs against that copy,
 and the harness reports whether the suite noticed.
 
-Three properties are load-bearing and none is traded for speed:
+Four properties are load-bearing and none is traded for speed:
 
 - MISSED: a reverted fix that no test catches fails the run.
 - STALE: an entry whose file or snippet no longer matches verified nothing, so
   it fails the run too.
 - INCONCLUSIVE: a suite run that never finished verified nothing either, so it
   is neither a pass nor a catch, and it fails the run as well.
+- INCIDENTAL: a red suite is not automatically a catch. An entry may name the
+  test(s) that own the property it claims to pin, and a named entry is CAUGHT
+  only if one of them is red. A red anywhere else fails the run instead.
 
-The last one is the direction this harness must never fail in. "I could not
+INCONCLUSIVE is the direction this harness must never fail in. "I could not
 tell" resolving to "covered" is worse than a crash, because a crash gets
-noticed.
+noticed. INCIDENTAL is the same hazard one level in: a red for the wrong
+reason resolving to "covered" reads exactly like coverage and is not.
+
+    python3 tools/mutation_check.py --audit        # which tests each revert breaks
+
+`--audit` runs every entry without `-x` and prints the whole failure set, which
+is how an entry worth pinning gets found rather than guessed. It is a
+diagnostic and always exits 0; the gate is the pin.
 
 Every mutation is independent, so they run concurrently, one sandbox per
 worker. Sandboxing is what makes that safe: the real working tree is never
