@@ -13,10 +13,10 @@ Three origins, deliberately few:
   This is the one to audit. `PipelineResult.unjustified()` lists exactly these.
 - `cited`: taken from a source, which is recorded in `note`.
 
-This is a reduced form of the multi-registry approach used in EdSim (which
-separates open placeholders, cited figures, deferred simplifications, and
-shipped simplifications). One tag is cheap to add now and expensive to
-retrofit onto user configs later, so it ships in v0.1; the finer split can
+This is a reduced form of a multi-registry approach, which separates open
+placeholders, cited figures, deferred simplifications, and shipped
+simplifications into distinct tags. One tag is cheap to add now and expensive
+to retrofit onto user configs later, so it ships in v0.1; the finer split can
 come once usage shows it is needed.
 """
 

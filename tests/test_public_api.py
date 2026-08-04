@@ -11,7 +11,7 @@ re-exported from `importlib.metadata` purely because the version lookup
 imported it un-aliased, so `sw.PackageNotFoundError` was a real, usable,
 entirely unintended part of the API. Nothing had noticed.
 
-The nine submodules bound by importing their contents (`sw.schema`,
+The ten submodules bound by importing their contents (`sw.schema`,
 `sw.rules`, ...) are asserted as they are, not as they should be. Whether
 they belong in the surface is a separate decision (#52); this file only makes
 the current answer impossible to change by accident.
@@ -44,6 +44,8 @@ EXPECTED = (
     # rules
     "Rule", "Constant", "Choice", "Integer", "Uniform", "Normal",
     "Conditional", "Sequential", "check_rule", "RuleConformanceError",
+    # mode
+    "Mode", "ModeSchema",
     # pipeline
     "Pipeline", "PipelineResult", "RunContext",
     # fidelity
@@ -64,6 +66,9 @@ EXPECTED = (
 EXPECTED_SUBMODULES = (
     "context",
     "fidelity",
+    # `from .mode import Mode, ModeSchema` binds `mode` here too, exactly as
+    # every other `from .<module> import ...` above does.
+    "mode",
     "pipeline",
     "provenance",
     "registry",

@@ -133,14 +133,29 @@ class OCR(NoiseOp):
 
 
 def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str) -> np.ndarray:
-    """Per-row rates from a rate function, range-checked.
+    """Per-row rates from a rate function, length- and range-checked.
 
     A flat rate is checked in `NoiseOp.__init__`; a function's output only
     exists once it has been called, so the same check has to happen here.
     Out of range is silent otherwise: above 1 corrupts every row, below 0
     corrupts none, and both look like a result rather than a config error.
+
+    The length is checked for the same reason. `np.asarray` accepts a scalar
+    or a length numpy can broadcast, so a rate derived from the chunk as a
+    whole (a mean, a count, a row's position) applies cleanly and makes the
+    output depend on `chunk_size`, which is meant to be a memory knob. A
+    function is asked for one rate per row; anything else is a config error,
+    not a rate. A genuinely flat rate is spelled as a number, not a function.
     """
     rates = np.asarray(fn(chunk), dtype=float)
+    if rates.shape != (len(chunk),):
+        got = "a scalar" if rates.ndim == 0 else f"shape {rates.shape}"
+        raise ValueError(
+            f"noise rate function for {path} must return one rate per row: "
+            f"expected shape {(len(chunk),)}, got {got}. A rate computed from the "
+            f"chunk as a whole is not a function of the row, and would make the "
+            f"result depend on chunk_size."
+        )
     if not np.all((rates >= 0.0) & (rates <= 1.0)):
         bad = rates[(rates < 0.0) | (rates > 1.0)]
         raise ValueError(
@@ -208,7 +223,11 @@ class Noise:
                         f"which does not exist; available: {sorted(chunk.columns)}"
                     )
                 original_dtype = chunk[column].dtype
-                values = chunk[column].to_numpy(dtype=object)
+                # copy=True is required: under pandas 3 copy-on-write, to_numpy on a
+                # column that is already object dtype hands back a read-only view, so
+                # the `values[hit] = ...` write below raises. It has no observable
+                # effect on pandas 2, so the test-pandas3 CI job is its only guard.
+                values = chunk[column].to_numpy(dtype=object, copy=True)
                 for op in ops:
                     salt = f"noise\x00{table.name}\x00{column}\x00{op.name}"
                     rate = ctx.provenance.add(

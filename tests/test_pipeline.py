@@ -270,6 +270,10 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     Chunking is the real risk here: the function is handed each chunk
     separately, so a rate that depended on chunk-level state (a mean, a
     position) rather than on the row would silently break this.
+
+    A row-wise function alone cannot show that, because it has no chunk-level
+    state to get wrong. So this test also runs an aggregate rate function, the
+    exact shape the docstring warns about, and requires it to be refused.
     """
     table = sw.Table(
         "survey",
@@ -283,6 +287,32 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     )
     invariants.assert_deterministic(schema, noiser=noiser)
     invariants.assert_chunk_invariant(schema, noiser=noiser)
+
+    aggregate = sw.Noise(
+        {"survey": {"amount": [sw.Missing(lambda f: float((f["education"] == "HS").mean()))]}}
+    )
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+        sw.Pipeline(schema, chunk_size=7, noiser=aggregate).run()
+
+
+def test_a_rate_function_returning_the_wrong_length_fails_loudly(people):
+    """One rate per row, or an error. Broadcasting is the trap.
+
+    `np.asarray(fn(chunk))` accepts a length the chunk never had, and numpy
+    broadcasts a length-1 result over every row without complaint. That reads
+    as a working per-row rate while being a flat one, so the mistake survives
+    to the output rather than to a traceback.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+    noiser = sw.Noise({"survey": {"amount": [sw.Missing(lambda f: [0.3])]}})
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
 
 
 def test_a_row_varying_rate_outside_zero_to_one_fails_loudly(people):
@@ -763,7 +793,9 @@ def test_typos_leave_missing_values_alone(many_people):
     schema = sw.Schema(entities=[many_people], tables=[roster], seed=1)
 
     values = sw.Pipeline(schema, noiser=noiser).run()["roster"]["education"]
-    written = {v for v in values if v is not None}
+    # pd.notna, not `is not None`: pandas 3 spells a null in a text column as
+    # float nan, which `is not None` would let through into the `in` check below.
+    written = {v for v in values if pd.notna(v)}
     assert not any("None" in v for v in written)
 
 
