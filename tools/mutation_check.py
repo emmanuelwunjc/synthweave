@@ -776,6 +776,12 @@ MUTATIONS = [
         "            columns=columns,\n        )",
         "            columns=sorted(columns),\n        )",
     ),
+    (
+        "#142 check_synthesizer names the dropped row key instead of raising KeyError",
+        "src/synthweave/conformance.py",
+        "    if ROW_KEY not in got.columns:",
+        "    if False:",
+    ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
     # real bound change makes this STALE, which fails the run and points at the
