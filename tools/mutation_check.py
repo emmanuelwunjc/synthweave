@@ -696,10 +696,13 @@ MUTATIONS = [
         '    if getattr(chunk, "_is_view", False):',
     ),
     (
+        # Retargeted 2026-08-04: #82 moved the empty-table build into
+        # `_empty_frame`, so the old snippet stopped matching and the entry went
+        # STALE. Same guarantee, same test, new line.
         "#65 an empty table keeps its declared column order, not a sorted one",
         "src/synthweave/pipeline.py",
-        "        return pd.DataFrame(columns=columns)",
-        "        return pd.DataFrame(columns=sorted(columns))",
+        "            columns=columns,\n        )",
+        "            columns=sorted(columns),\n        )",
     ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
