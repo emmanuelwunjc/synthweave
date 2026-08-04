@@ -30,7 +30,7 @@ from .context import RunContext
 from .provenance import ProvenanceRecord
 from .registry import resolve
 from .rules import as_declared
-from .schema import Schema, Table
+from .schema import PerEvent, Schema, Table
 from .validation import RESERVED_PREFIX, validate_schema
 
 
@@ -172,14 +172,23 @@ class Pipeline:
         the same `as_declared` call the generator ends every populated draw
         with. That keeps one source of truth, the rule's own `dtype()`: this
         path cannot drift from the populated one without the populated one
-        moving too. A column whose rule declares nothing (an identifier, a
-        grain column, a `Sequential`) is left `object`, exactly as before,
-        since a rule that will not name its type cannot be second-guessed
-        from zero rows.
+        moving too. The column a grain emits has no rule at all, so it gets a
+        stand-in one from `_grain_column_rule` and goes through the same call.
+
+        A column whose rule declares nothing (an identifier, a `Choice` over
+        strings, a `Sequential`) is left `object`. That limit is real rather
+        than an oversight: its populated type comes from pandas inferring over
+        the values, and zero rows offer nothing to infer from.
         """
         entity = self.schema.entity(table.entity)
         rules = {name: entity.attributes[name] for name in table.carry}
         rules.update(table.columns)
+        grain_rule = _grain_column_rule(table.grain)
+        if grain_rule is not None:
+            # The grain's own column joins the rules rather than getting a
+            # branch of its own, so it is typed by the same `as_declared` call
+            # as everything else and there is still one typing path here.
+            rules[table.grain.emitted_column()] = grain_rule
         empty = np.array([], dtype=object)
         columns = self._columns_of(table)
         return pd.DataFrame(
@@ -193,6 +202,39 @@ class Pipeline:
     def stream(self, table_name: str) -> Iterator[pd.DataFrame]:
         """Chunks for one table, for a caller doing its own streaming."""
         return self._stream(self.schema.table(table_name), self._context())
+
+
+@dataclass(frozen=True)
+class _GrainColumn:
+    """A stand-in rule for the column a grain emits.
+
+    Carries the one part of the rule protocol `as_declared` reads, which is
+    what lets a grain column be typed by the same call as every other column
+    instead of a branch beside it.
+    """
+
+    declared: np.dtype
+
+    def dtype(self) -> np.dtype:
+        return self.declared
+
+
+def _grain_column_rule(grain) -> _GrainColumn | None:
+    """The type the generator gives a grain's own column, where it fixes one.
+
+    A grain is not a rule, so it declares nothing and `_empty_frame` has no
+    `dtype()` to read. That is not the same as the type being unknowable:
+
+    * `PerEvent`'s occurrence column is built with `np.arange` in
+      `stages/generate.py::_expand`, so numpy fixes the type and no config can
+      move it. Reading it off `np.arange` at length zero keeps this a reading
+      of that construction rather than a literal maintained beside it.
+    * `PerPeriod`'s period column is `np.asarray(periods, dtype=object)`
+      there, which is `object` whatever the periods are, and an untyped empty
+      column is `object` already. Nothing to correct.
+    * `PerEntity` emits no column of its own.
+    """
+    return _GrainColumn(np.arange(0).dtype) if isinstance(grain, PerEvent) else None
 
 
 def _strip_reserved(chunks: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:

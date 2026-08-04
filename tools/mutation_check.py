@@ -949,6 +949,24 @@ MUTATIONS = [
         '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
         '    current = _git("describe", "--tags", "--exact-match").strip()',
     ),
+    # The exact line #125 reported: `write_empty` rebuilding its own stand-in
+    # frame instead of writing the typed one the pipeline handed it. Invisible
+    # on CSV, baked into the file on Parquet, where every column comes back as
+    # the `null` type on a run that happened to cover no entity.
+    (
+        "#125 an empty table's Parquet file keeps the schema its rules declare",
+        "src/synthweave/io.py",
+        "        empty = self.empty\n",
+        "        empty = pd.DataFrame({name: pd.Series(dtype=object) for name in self.columns})\n",
+    ),
+    # #137's occurrence half: the grain column loses its stand-in rule and goes
+    # back to `object` on a zero-row run against `int64` populated.
+    (
+        "#137 an empty event table keeps its grain column's declared dtype",
+        "src/synthweave/pipeline.py",
+        "    return _GrainColumn(np.arange(0).dtype) if isinstance(grain, PerEvent) else None",
+        "    return None",
+    ),
 ]
 
 
