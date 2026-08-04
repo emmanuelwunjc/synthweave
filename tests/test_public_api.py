@@ -27,11 +27,13 @@ bare `import synthweave`.
 
 from __future__ import annotations
 
-import functools
+import copy
 import json
 import os
 import subprocess
 import sys
+
+import pytest
 
 import synthweave as sw
 
@@ -89,15 +91,37 @@ for name in public:
         modules.append(name)
         origin = obj.__name__
     else:
-        origin = getattr(obj, "__module__", None)
-    if origin is not None and origin.split(".")[0] != "synthweave":
+        # `__module__` answers directly for a class or a function. A leaked
+        # *primitive* has none at all -- `from os.path import sep` binds a
+        # plain str -- so fall back to the type that owns it, which reports
+        # "builtins". Skipping the no-__module__ case was the hole: a leaked
+        # foreign primitive used to pass this check untouched, and only the
+        # sibling freeze test noticed it, incidentally.
+        origin = getattr(obj, "__module__", None) or getattr(
+            type(obj), "__module__", ""
+        )
+    if origin.split(".")[0] != "synthweave":
         foreign[name] = origin
 print(json.dumps({"public": public, "modules": modules, "foreign": foreign}))
 """
 
 
-@functools.lru_cache(maxsize=1)
-def _fresh_namespace() -> dict:
+def _probe_failure(reason: str, proc: subprocess.CompletedProcess) -> str:
+    """Everything needed to diagnose a bad probe run from the CI log alone.
+
+    The raw streams are the point. A sitecustomize print, a deprecation
+    warning on stdout, or an import-time banner all make the payload
+    unparseable, and a bare `JSONDecodeError` names none of them.
+    """
+    return (
+        f"public-API probe {reason}\n"
+        f"--- returncode ---\n{proc.returncode}\n"
+        f"--- stdout ---\n{proc.stdout}\n"
+        f"--- stderr ---\n{proc.stderr}"
+    )
+
+
+def _run_probe() -> dict:
     """What `import synthweave` alone exposes, measured in a new interpreter."""
     src = os.path.dirname(os.path.dirname(os.path.abspath(sw.__file__)))
     # Extend the environment, never replace it. A helper here once built a
@@ -113,12 +137,37 @@ def _fresh_namespace() -> dict:
         env=env,
         check=False,
     )
-    assert proc.returncode == 0, f"probe failed:\n{proc.stdout}\n{proc.stderr}"
-    return json.loads(proc.stdout)
+    if proc.returncode != 0:
+        raise AssertionError(_probe_failure("exited non-zero", proc))
+    # The payload is the probe's last line. Anything the interpreter or an
+    # installed package prints ahead of it is noise, not a parse error.
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AssertionError(_probe_failure("printed nothing", proc))
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            _probe_failure(f"printed an unparseable last line ({exc})", proc)
+        ) from exc
 
 
-def _public_names() -> set[str]:
-    return set(_fresh_namespace()["public"])
+@pytest.fixture(scope="module")
+def _probe_result() -> dict:
+    """One subprocess for the whole module. Never handed to a test directly."""
+    return _run_probe()
+
+
+@pytest.fixture
+def fresh_namespace(_probe_result: dict) -> dict:
+    """A private copy per test, so no test can perturb another's view.
+
+    The subprocess still runs once. The copy is what keeps four tests from
+    sharing one mutable dict, which is the failure mode a cached singleton
+    invites: an accidental `.pop()` in one test silently changes what the
+    next one asserts on, and the flake surfaces as a test-order dependency.
+    """
+    return copy.deepcopy(_probe_result)
 
 
 def test_expected_lists_each_name_once():
@@ -135,27 +184,39 @@ def test_all_matches_the_frozen_surface():
 
 
 def test_every_exported_name_resolves():
+    # Resolution is the whole claim. A second `getattr(sw, name) is not None`
+    # loop used to sit here and was deliberately removed: `hasattr` above
+    # already covers it, so it could only fire on a literal `Schema = None`,
+    # which no realistic breakage produces. Verified: dropping an export makes
+    # the assertion below fire before that loop is ever reached, and rebinding
+    # one to a wrong object (`Prior = 3`) left it green. That second case is
+    # now genuinely covered, by the foreign-origin test below -- an int's
+    # origin is "builtins", which is not synthweave.
     missing = [name for name in EXPECTED if not hasattr(sw, name)]
     assert missing == []
-    for name in EXPECTED:
-        assert getattr(sw, name) is not None
 
 
-def test_no_public_name_is_a_foreign_import():
+def test_no_public_name_is_a_foreign_import(fresh_namespace):
     """No top-level public name may come from outside synthweave.
 
     An un-aliased `from importlib.metadata import PackageNotFoundError`, or
     any `import pandas`-style leak, publishes someone else's object under our
     name. Private aliases (`_PackageNotFoundError`) are the fix: they keep the
     import usable and out of the surface.
+
+    Foreign *primitives* count. A leaked `sep` is a str with no `__module__`,
+    and the probe resolves it through its type rather than passing over it.
+    A public scalar constant would therefore read as foreign here too; there
+    are none today, and adding one should be an argued change to this test
+    rather than a silent exemption.
     """
-    assert _fresh_namespace()["foreign"] == {}
+    assert fresh_namespace["foreign"] == {}
 
 
-def test_only_the_known_submodules_are_bound():
-    assert set(_fresh_namespace()["modules"]) == set(EXPECTED_SUBMODULES)
+def test_only_the_known_submodules_are_bound(fresh_namespace):
+    assert set(fresh_namespace["modules"]) == set(EXPECTED_SUBMODULES)
 
 
-def test_nothing_public_is_undeclared():
+def test_nothing_public_is_undeclared(fresh_namespace):
     """Every public name is either an export or a known bound submodule."""
-    assert _public_names() == set(EXPECTED) | set(EXPECTED_SUBMODULES)
+    assert set(fresh_namespace["public"]) == set(EXPECTED) | set(EXPECTED_SUBMODULES)

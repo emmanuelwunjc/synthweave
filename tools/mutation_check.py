@@ -526,11 +526,22 @@ MUTATIONS = [
     (
         "#60 PackageNotFoundError stays out of the public namespace",
         "src/synthweave/__init__.py",
+        # Not a literal revert, deliberately. Before #60 the module both
+        # imported `PackageNotFoundError` un-aliased *and* caught it un-aliased
+        # forty lines later, so undoing the fix for real spans two hunks and an
+        # entry here carries exactly one contiguous snippet. The alias
+        # assignment keeps the `except _PackageNotFoundError` clause bound
+        # while restoring the public leak, which is the property under test.
+        # An earlier form appended a duplicate un-aliased import instead; it
+        # was CAUGHT too, but left the sandbox tree failing pyflakes with
+        # "imported but unused", i.e. a mutation no reviewer would accept as a
+        # plausible edit.
         "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
         "from importlib.metadata import version as _installed_version",
         "from importlib.metadata import PackageNotFoundError\n"
-        "from importlib.metadata import PackageNotFoundError as _PackageNotFoundError\n"
-        "from importlib.metadata import version as _installed_version",
+        "from importlib.metadata import version as _installed_version\n"
+        "\n"
+        "_PackageNotFoundError = PackageNotFoundError",
     ),
     (
         "#63 faker_names validates Faker's private provider shape",
