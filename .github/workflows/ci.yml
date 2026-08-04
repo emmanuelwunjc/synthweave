@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Superseded runs on the same PR are wasted runner time, and with `strict: true`
+# branch protection there are a lot of them: every merge to main rebases the
+# queue and re-triggers everything. Cancelling is only safe for pull_request
+# though. A `push: main` run is the post-merge safety net and the last place
+# a bad merge gets caught, so it is deliberately never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -65,15 +74,22 @@ jobs:
   # This repo's definition of done: a fix is not done until reverting it turns
   # the suite red. It used to be enforced by memory alone, which is how two
   # issues were once logged as fixed with no regression coverage at all.
-  # Its own job so `test` still reports quickly; this one rebuilds the suite
-  # per mutation and takes minutes.
-  mutation-check:
+  #
+  # Split across runners because this job was 84% of CI's critical path (about
+  # 500s of a 594s median run) while every other job finished in under 70s.
+  # Branch protection is `strict: true`, so that one job set the pace of the
+  # whole merge queue. `tests/test_mutation_shards.py` asserts these legs are
+  # exactly 1..N for the N in the command; drift there would silently stop
+  # running some mutations.
+  mutation-shard:
     runs-on: ubuntu-latest
-    # ~7min observed. GitHub sends SIGTERM before SIGKILL on timeout, which
-    # tools/mutation_check.py already handles (see its atexit/SIGTERM
-    # restore); this bound just stops a hang from running to the platform's
-    # 360-minute default instead of failing fast.
     timeout-minutes: 20
+    strategy:
+      # Every shard's result is wanted, not just the first failure: a run that
+      # stops early hides the other gaps and costs another full cycle to find.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -83,4 +99,21 @@ jobs:
       - run: pip install -e ".[dev]"
       # Fails on MISSED (a fix nothing catches) and on STALE (an entry whose
       # snippet or file no longer matches, which verified nothing at all).
-      - run: python3 tools/mutation_check.py
+      - run: python3 tools/mutation_check.py --shard ${{ matrix.shard }}/6
+
+  # Branch protection requires the check named `mutation-check`, and is
+  # deliberately not being edited here, so the gate keeps that exact name and
+  # becomes an aggregator over the shards.
+  #
+  # `if: always()` is load-bearing, not style. Without it, a failing shard
+  # leaves this job *skipped* rather than failed, and GitHub documents that a
+  # skipped required check may not block merging. That would turn the gate
+  # into a no-op precisely when it matters.
+  mutation-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: mutation-shard
+    if: always()
+    steps:
+      - run: |
+          [ "${{ needs.mutation-shard.result }}" = "success" ] || exit 1

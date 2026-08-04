@@ -15,6 +15,14 @@ worker. Sandboxing is what makes that safe: the real working tree is never
 written to, which also retires the 2026-07-31 false alarm (a killed process
 leaving a reverted snippet behind) and the 2026-08-02 hazard where a
 concurrent `git checkout` tripped over a mid-run mutation.
+
+    python3 tools/mutation_check.py                # every entry
+    python3 tools/mutation_check.py --shard 2/6    # one CI runner's share
+
+CI fans the shards out across runners and rolls them up into the
+`mutation-check` gate. `tests/test_mutation_shards.py` asserts the shards
+partition the list and that the workflow's matrix matches the `N` it passes;
+a shard that quietly skips entries would report a pass it never earned.
 """
 
 import concurrent.futures
@@ -28,8 +36,12 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Copied per worker: everything except the version-control metadata and caches,
-# which the suite never reads and which dominate the copy cost.
+# Copied per worker: everything except the version-control metadata and caches.
+# `.git` is skipped because it dominates the copy cost and because in a linked
+# worktree it is a file pointing at another directory, which would not survive
+# the copy anyway. One consequence, checked and accepted: `test_docs_map_sync`
+# self-skips without a git checkout, so it runs against the real tree but not
+# inside a sandbox. It guards a docs index, not any entry in MUTATIONS.
 SANDBOX_SKIP = (".git", "__pycache__", ".pytest_cache")
 
 # (issue, file, original_snippet, reverted_snippet)
@@ -490,11 +502,44 @@ def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path
     return ("CAUGHT" if not ok else "MISSED"), name, msg
 
 
-def main() -> int:
+def shard(entries: list, spec: str | None) -> list:
+    """Return the `i/N` slice of `entries`, or all of them when spec is None.
+
+    Strided, not chunked, and deliberately so: `entries[i-1::N]` covers every
+    index exactly once for *any* N, so no arithmetic can drop an entry the way
+    a start/stop chunk calculation can when the count does not divide evenly.
+    That property is the whole point. A shard that silently skips a mutation
+    reports a pass it never earned, which is the one failure mode this harness
+    exists to prevent.
+    """
+    if spec is None:
+        return list(entries)
+    index, _, count = spec.partition("/")
+    if not count.isdigit() or not index.isdigit():
+        raise SystemExit(f"--shard wants i/N with both parts numeric, got {spec!r}")
+    index, count = int(index), int(count)
+    if count < 1 or not 1 <= index <= count:
+        raise SystemExit(f"--shard {spec}: need 1 <= i <= N and N >= 1")
+    return list(entries)[index - 1 :: count]
+
+
+def main(argv: list[str]) -> int:
+    spec = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--shard":
+            raise SystemExit(f"usage: {sys.argv[0]} [--shard i/N]")
+        spec = argv[1]
+    entries = shard(MUTATIONS, spec)
+    # Printed so the sum across a CI matrix is auditable from the logs alone:
+    # the counts have to add up to the total, or a shard was left unrun.
+    print(f"shard {spec or 'all'}: {len(entries)} of {len(MUTATIONS)} mutations")
+    if not entries:
+        raise SystemExit(f"--shard {spec}: no mutations in this shard, so nothing would be verified")
+
     with tempfile.TemporaryDirectory(prefix="mutation-check-") as tmp:
         # One sandbox per worker, not per mutation: the copy is reused, so the
         # copy cost is paid `workers` times rather than once per entry.
-        workers = min(len(MUTATIONS), os.cpu_count() or 1)
+        workers = min(len(entries), os.cpu_count() or 1)
         sandboxes: "queue.Queue[pathlib.Path]" = queue.Queue()
         for i in range(workers):
             box = pathlib.Path(tmp) / f"w{i}"
@@ -520,7 +565,7 @@ def main() -> int:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             # `map` yields in submission order, so the log reads the same way
             # it did when this ran one entry at a time.
-            for verdict, name, detail in pool.map(lambda e: check(e, sandboxes), MUTATIONS):
+            for verdict, name, detail in pool.map(lambda e: check(e, sandboxes), entries):
                 if verdict == "STALE":
                     print(f"  STALE  {name}: {detail}")
                     stale.append(name)
@@ -545,4 +590,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

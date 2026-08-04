@@ -10,6 +10,10 @@ required set is derived from the workflow files rather than assumed:
     never be a gate no matter what branch protection says.
   - A matrix job reports one check per interpreter, but protection waits on
     the minimum supported one only. The rest run for information.
+  - A job that another job `needs` gates through that dependent rather than on
+    its own. `mutation-shard` is fanned out across runners and rolled up by
+    `mutation-check`; protection lists the roll-up, not the legs, so the leg
+    count can change without touching branch protection.
 
 The parsing here is deliberately regex-based: PyYAML is not a dependency of
 this package, and adding one so a test can read two small workflow files is
@@ -47,14 +51,29 @@ def _gating_python_version() -> str:
     return match.group(1)
 
 
+def _jobs_depended_on(blocks: list[str]) -> set[str]:
+    """Job ids named in some other job's `needs:`. They report their own check
+    run, but branch protection waits on the job that rolls them up."""
+    depended = set()
+    for block in blocks:
+        match = re.search(r"^    needs:\s*(.+)$", block, re.MULTILINE)
+        if match:
+            depended.update(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]*", match.group(1)))
+    return depended
+
+
 def _required_checks(workflow_text: str, gating_python: str) -> set[str]:
     """The checks in one workflow that can actually block a merge."""
     checks = set()
-    for block in _job_blocks(workflow_text):
+    blocks = _job_blocks(workflow_text)
+    depended = _jobs_depended_on(blocks)
+    for block in blocks:
         job_id = re.match(r"  ([a-zA-Z][a-zA-Z0-9_-]*):\n", block).group(1)
         # Four spaces: a job-level key. A step's own continue-on-error is
         # indented deeper and does not make the whole job advisory.
         if re.search(r"^    continue-on-error:\s*true\s*$", block, re.MULTILINE):
+            continue
+        if job_id in depended:
             continue
         match = re.search(r"python-version:\s*\[([^\]]+)\]", block)
         if match:
@@ -127,6 +146,30 @@ def test_only_the_gating_interpreter_of_a_matrix_job_is_required():
         "      - run: true\n"
     )
     assert _required_checks(workflow, "3.10") == {"test (3.10)"}
+
+
+def test_a_job_another_job_needs_is_not_itself_required():
+    """A fanned-out job rolled up by an aggregator gates through the
+    aggregator. Counting the legs as required would document gates branch
+    protection does not have, and would make the leg count impossible to
+    change without editing branch protection.
+    """
+    workflow = (
+        "name: X\n"
+        "\njobs:\n"
+        "  leg:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: true\n"
+        "\n"
+        "  rollup:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    needs: leg\n"
+        "    if: always()\n"
+        "    steps:\n"
+        "      - run: true\n"
+    )
+    assert _required_checks(workflow, "3.10") == {"rollup"}
 
 
 def test_matrix_without_the_gating_interpreter_is_an_error():
