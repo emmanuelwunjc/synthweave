@@ -274,6 +274,13 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     A row-wise function alone cannot show that, because it has no chunk-level
     state to get wrong. So this test also runs an aggregate rate function, the
     exact shape the docstring warns about, and requires it to be refused.
+
+    Both guarantees are true of a column nothing happened to, so they are
+    asserted about an output first shown to be non-trivial: the rate has to
+    have varied by row, or two identical clean runs and two identical clean
+    chunkings prove only that the noiser did nothing, twice. A rate function
+    quietly collapsed to a flat rate keeps every assertion below green
+    otherwise, which is what this test used to allow.
     """
     table = sw.Table(
         "survey",
@@ -285,13 +292,30 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     noiser = sw.Noise(
         {"survey": {"amount": [sw.Missing(lambda f: 0.05 + 0.25 * (f["education"] == "HS"))]}}
     )
+
+    # 400 entities, so the bounds are wide on purpose: the declared rates are
+    # 0.30 and 0.05 and 3 sigma is about 9 and 5 points. This asks only that
+    # the rate is a function of the row, not that it is precisely realized,
+    # which `test_missingness_rate_can_vary_by_row` pins at 20,000 entities.
+    blank = (
+        sw.Pipeline(schema, chunk_size=invariants.SPLIT, noiser=noiser)
+        .run()["survey"]
+        .groupby("education")["amount"]
+        .apply(lambda s: s.isna().mean())
+    )
+    assert blank["HS"] > 0.20, f"HS rows were barely blanked: {blank.to_dict()}"
+    assert blank["College"] < 0.12, f"College rows were over-blanked: {blank.to_dict()}"
+
     invariants.assert_deterministic(schema, noiser=noiser)
     invariants.assert_chunk_invariant(schema, noiser=noiser)
 
     aggregate = sw.Noise(
         {"survey": {"amount": [sw.Missing(lambda f: float((f["education"] == "HS").mean()))]}}
     )
-    with pytest.raises(ValueError, match=r"survey\.amount\.missing"):
+    # Matched on the reason, not just the path: a ValueError raised for some
+    # unrelated complaint about the same column would otherwise read as the
+    # chunk-derived rate being refused.
+    with pytest.raises(ValueError, match=r"survey\.amount\.missing must return one rate per row"):
         sw.Pipeline(schema, chunk_size=7, noiser=aggregate).run()
 
 
