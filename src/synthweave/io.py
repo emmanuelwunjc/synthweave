@@ -21,17 +21,25 @@ class ChunkWriter:
         table: str,
         *,
         format: str = "parquet",
-        columns: list[str] | None = None,
+        empty: pd.DataFrame | None = None,
     ) -> None:
         if format not in ("parquet", "csv"):
             raise ValueError(f"unsupported format {format!r}; use 'parquet' or 'csv'")
         self.format = format
         self.path = Path(directory) / f"{table}.{format}"
-        # Declared up front so a table that turns out to have no rows still
-        # leaves a file a reader can open. Without it the CSV was zero bytes
-        # and the Parquet file was never created at all, while the run
-        # reported success either way.
-        self.columns = list(columns) if columns else []
+        # The frame to write when no chunk ever arrives, declared up front so a
+        # table that turns out to have no rows still leaves a file a reader can
+        # open. Without it the CSV was zero bytes and the Parquet file was
+        # never created at all, while the run reported success either way.
+        #
+        # It arrives already typed, from `Pipeline._empty_frame`, rather than
+        # being rebuilt here from a list of names. Building it here meant every
+        # column came out `object`, which CSV cannot show but Parquet bakes
+        # into the file schema as the `null` type: a consumer reading a
+        # directory of parts then got a schema that depended on whether that
+        # partition happened to produce rows.
+        self.empty = pd.DataFrame() if empty is None else empty
+        self.columns = list(self.empty.columns)
         self._writer = None
         self._wrote_header = False
         self._csv_columns: list[str] | None = None
@@ -131,8 +139,12 @@ class ChunkWriter:
         An empty table is a real answer, so it gets a real file: a CSV with
         just its header, or a Parquet file with a schema and zero rows. Both
         read back as an empty frame rather than raising.
+
+        The frame is the one the caller declared, dtypes included, so the
+        Parquet schema matches what a populated run of the same table would
+        have written for every column whose rule names a type.
         """
-        empty = pd.DataFrame({name: pd.Series(dtype=object) for name in self.columns})
+        empty = self.empty
         if self.format == "csv":
             empty.to_csv(self.path, index=False)
             return

@@ -139,8 +139,11 @@ class Pipeline:
         paths: dict[str, str] = {}
 
         for table in self.schema.tables:
+            # The same typed stand-in `run` hands back for a table that
+            # produced nothing, so the file and the in-memory result cannot
+            # disagree about the schema of a zero-row run.
             writer = ChunkWriter(
-                out, table.name, format=format, columns=self._columns_of(table)
+                out, table.name, format=format, empty=self._empty_frame(table)
             )
             rows = 0
             for chunk in self._stream(table, ctx):
