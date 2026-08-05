@@ -131,11 +131,33 @@ FAILURE_HEADLINE = {
 
 # (issue, file, original_snippet, reverted_snippet[, catchers])
 #
-# `catchers` is optional and is the #158 mechanism: a tuple of pytest node ids
-# naming the test(s) that own the property the entry claims to pin. When it is
-# present the entry is CAUGHT only if at least one of them is red under the
-# revert, so a suite that went red somewhere else entirely no longer counts.
-# See `check()` for why a missing node id is STALE rather than a catch.
+# `catchers` is the #158 mechanism: a tuple of pytest node ids naming the
+# test(s) that own the property the entry claims to pin. When it is present the
+# entry is CAUGHT only if at least one of them is red under the revert, so a
+# suite that went red somewhere else entirely no longer counts. See `check()`
+# for why a missing node id is STALE rather than a catch.
+#
+# It stays syntactically optional here so an entry can be added and pinned in
+# two steps and so `check()` keeps a defined answer for a four-element tuple.
+# It is not optional in practice: `test_every_entry_names_a_catcher` fails the
+# `test` job on an unpinned entry, naming it. That is deliberate. Asking in a
+# comment is what left 109 of 113 entries unpinned after #158 landed.
+#
+# The pins were chosen from a full `--audit` run, which lists every test each
+# revert breaks; the named catcher is the one that asserts the property, not
+# merely one that happened to be red.
+#
+# Two known limitations, both recorded rather than silently lived with:
+#
+# - `test_own_makes_a_view_safe_to_write_to`, the sole catcher for the two
+#   `own()` entries, self-skips when `pd.errors.SettingWithCopyWarning` is
+#   absent, i.e. under pandas 3. That is latent, not live: this harness runs
+#   only in the `mutation-shard` job, which installs the pinned pandas 2. The
+#   `test-pandas3` job runs pytest and never this file. Under pandas 3's
+#   copy-on-write the hazard genuinely does not exist, so there is no test to
+#   write there.
+# - A few entries are pinned to the best catcher that exists rather than to a
+#   test that asserts the property outright. Each has its own issue.
 MUTATIONS = [
     (
         "I1 synthesizer table scoping",
@@ -145,6 +167,10 @@ MUTATIONS = [
             return
 """,
         "",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_table_outside_the_synthesizer_scope_passes_through",
+            "tests/test_mode.py::test_a_real_data_column_stays_out_of_a_table_that_did_not_declare_it",
+        ),
     ),
     (
         "I3 fit buffer truncation (chunk invariance)",
@@ -153,6 +179,10 @@ MUTATIONS = [
         buffered = buffered.iloc[:max_rows]
 """,
         "",
+        (
+            "tests/test_synthesis_and_plugins.py::test_above_the_cap_the_fit_is_capped",
+            "tests/test_pipeline.py::test_chunk_size_cannot_change_output_with_every_stage_active",
+        ),
     ),
     (
         "I4 first column conditions on predictors",
@@ -167,12 +197,19 @@ MUTATIONS = [
             if i == 0:
                 continue
 """,
+        (
+            "tests/test_synthesis_and_plugins.py::test_declared_structure_survives_synthesis",
+            "tests/test_synthesis_and_plugins.py::test_empirical_structure_is_learned_from_supplied_data",
+        ),
     ),
     (
         "I5 link before noise (identifier noise possible)",
         "src/synthweave/pipeline.py",
         "for stage in (self.synthesizer, self.linker, self.noiser):",
         "for stage in (self.synthesizer, self.noiser, self.linker):",
+        (
+            "tests/test_pipeline.py::test_an_identifier_column_can_be_noised_on_purpose",
+        ),
     ),
     (
         "I6 own() defensive copy",
@@ -181,6 +218,9 @@ MUTATIONS = [
         return chunk.copy()
     return chunk""",
         """    return chunk""",
+        (
+            "tests/test_synthesis_and_plugins.py::test_own_makes_a_view_safe_to_write_to",
+        ),
     ),
     (
         "I9 synthesized column keeps its fitted dtype",
@@ -192,6 +232,10 @@ MUTATIONS = [
             return pd.array(values, dtype=dtype)
         return values.astype(dtype)""",
         """        return values""",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_synthesized_column_keeps_the_dtype_it_had",
+            "tests/test_synthesis_and_plugins.py::test_a_synthesized_column_keeps_an_extension_dtype[Int64]",
+        ),
     ),
     (
         "I11 identifier tag vs column/carry collision",
@@ -203,6 +247,9 @@ MUTATIONS = [
             )
 """,
         "",
+        (
+            "tests/test_pipeline.py::test_an_identifier_tag_cannot_overwrite_a_table_column",
+        ),
     ),
     (
         "I11 identifier tag vs carried attribute",
@@ -214,6 +261,9 @@ MUTATIONS = [
             )
 """,
         "",
+        (
+            "tests/test_pipeline.py::test_an_identifier_tag_cannot_overwrite_a_carried_attribute",
+        ),
     ),
     (
         "I13 empty table still writes a file",
@@ -222,6 +272,10 @@ MUTATIONS = [
             self.write_empty()""",
         """        elif self.format == "csv" and not self._wrote_header:
             self.path.write_text("")""",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_table_with_no_rows_still_writes_a_readable_file",
+            "tests/test_synthesis_and_plugins.py::test_an_empty_table_writes_the_same_columns_as_a_full_one",
+        ),
     ),
     (
         "I12 writer reconciles a chunk against the file schema",
@@ -229,6 +283,10 @@ MUTATIONS = [
         """        elif batch.schema != self._writer.schema:
             batch = self._reconcile(batch, pa)""",
         "",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_widening_type_shift_between_chunks_is_absorbed",
+            "tests/test_synthesis_and_plugins.py::test_an_undeclared_column_type_that_shifts_between_chunks_names_itself",
+        ),
     ),
     (
         "I17 declared-numeric coercion names the column",
@@ -237,6 +295,9 @@ MUTATIONS = [
         bad = series[converted.isna() & series.notna()]""",
         """        converted = pd.to_numeric(series, errors="coerce")
         bad = []""",
+        (
+            "tests/test_synthesis_and_plugins.py::test_declaring_an_unparseable_column_numeric_says_which_column",
+        ),
     ),
     (
         "I13 empty table keeps its declared columns",
@@ -246,6 +307,9 @@ MUTATIONS = [
         # columns and see whether the suite notices.
         "        return empty\n",
         "        return pd.DataFrame()\n",
+        (
+            "tests/test_pipeline.py::test_a_table_that_emits_no_rows_still_has_its_columns",
+        ),
     ),
     (
         "I14 identifier width vs population",
@@ -254,24 +318,38 @@ MUTATIONS = [
         return""",
         """    if True:
         return""",
+        (
+            "tests/test_pipeline.py::test_a_digit_count_too_small_for_the_population_is_rejected",
+            "tests/test_pipeline.py::test_the_recommended_digit_count_is_the_tightest_one_that_works",
+        ),
     ),
     (
         "I14 digits past the hash width",
         "src/synthweave/schema.py",
         "        if self.digits > MAX_DIGITS:",
         "        if self.digits > 10**9:",
+        (
+            "tests/test_pipeline.py::test_a_digit_count_past_the_hash_width_is_rejected",
+        ),
     ),
     (
         "I15 joint prior picks over positions",
         "src/synthweave/stages/synthesize.py",
         "            positions = np.arange(len(pairs), dtype=object)",
         "            positions = np.array(pairs, dtype=object)",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_joint_prior_shapes_the_relationship_it_declares",
+            "tests/test_synthesis_and_plugins.py::test_a_joint_prior_is_chunk_invariant",
+        ),
     ),
     (
         "I16 repeated period rejected",
         "src/synthweave/schema.py",
         """        if repeated:""",
         """        if False:""",
+        (
+            "tests/test_pipeline.py::test_a_repeated_period_is_rejected",
+        ),
     ),
     (
         "I10/I12 rules declare their dtype",
@@ -279,6 +357,10 @@ MUTATIONS = [
         """    dtype = declared_dtype(rule)
     return values if dtype is None else values.astype(dtype)""",
         """    return values""",
+        (
+            "tests/test_noise.py::test_a_zero_rate_op_leaves_the_column_dtype_untouched",
+            "tests/test_pipeline.py::test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes",
+        ),
     ),
     (
         "I17 numeric decided by dtype, not by guessing",
@@ -287,12 +369,18 @@ MUTATIONS = [
         """        return column in self.numeric or (
             pd.to_numeric(series, errors="coerce").notna().mean() > 0.9
         )""",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_numeric_column_with_a_few_sentinel_values_still_fits",
+        ),
     ),
     (
         "I29 donor diagnostics silently stale on synthesizer reuse",
         "src/synthweave/stages/synthesize.py",
         "        self._fitted[table.name] = model",
         "        self._fitted.setdefault(table.name, model)",
+        (
+            "tests/test_fidelity.py::test_donor_diagnostics_reflects_only_the_last_run_when_synthesizer_is_reused",
+        ),
     ),
     (
         "I30 donor diagnostics readable mid-stream, before every chunk applied",
@@ -300,6 +388,9 @@ MUTATIONS = [
         """            complete = self._complete.get(table, False)
             return {table: dict(model.empty_donor_counts)} if model and complete else {}""",
         """            return {table: dict(model.empty_donor_counts)} if model else {}""",
+        (
+            "tests/test_fidelity.py::test_donor_diagnostics_excludes_a_table_still_mid_stream",
+        ),
     ),
     (
         "I28 SSN area 666 remapped onto 667 instead of skipped",
@@ -308,12 +399,18 @@ MUTATIONS = [
         area = np.where(area >= 666, area + 1, area)""",
         """        area = _hash.integers(keys, seed, f"{salt}\\x00area", 1, 900)
         area = np.where(area == 666, 667, area)""",
+        (
+            "tests/test_faker_names.py::test_ssn_area_is_not_skewed_by_the_666_exclusion",
+        ),
     ),
     (
         "I31 structure name needing config raises a bare TypeError",
         "src/synthweave/stages/synthesize.py",
         "        return _resolve_structure_name(structure)",
         '        return resolve("structure", structure)',
+        (
+            "tests/test_synthesis_and_plugins.py::test_structure_by_name_needing_config_names_the_missing_argument",
+        ),
     ),
     (
         "#10 per-row rate function is actually applied",
@@ -321,36 +418,55 @@ MUTATIONS = [
         """                    if callable(rate):
                         rate = _row_rates(rate, chunk, f"{table.name}.{column}.{op.name}")""",
         "",
+        (
+            "tests/test_pipeline.py::test_missingness_rate_can_vary_by_row",
+            "tests/test_pipeline.py::test_a_row_varying_rate_stays_deterministic_and_chunk_invariant",
+        ),
     ),
     (
         "#17 header-only ACS response rejected",
         "src/synthweave/connectors/acs_pums.py",
         "    if not payload or len(payload) <= 1:",
         "    if not payload or len(payload) < 1:",
+        (
+            "tests/test_acs_pums.py::test_a_header_only_response_is_a_failure_not_an_empty_frame",
+        ),
     ),
     (
         "#19 GeoNames TSV parsed without CSV quote handling",
         "src/synthweave/connectors/geonames.py",
         '    return list(csv.reader(io.StringIO(raw), delimiter="\\t", quoting=csv.QUOTE_NONE))',
         '    return list(csv.reader(io.StringIO(raw), delimiter="\\t"))',
+        (
+            "tests/test_geonames.py::test_a_leading_quote_does_not_swallow_the_following_row",
+        ),
     ),
     (
         "#18 missing birth year rejected before the range guard",
         "src/synthweave/connectors/ssa_names.py",
         "        missing = pd.isna(years)\n        if missing.any():",
         "        missing = pd.isna(years)\n        if False:",
+        (
+            "tests/test_ssa_names.py::test_a_nan_birth_year_is_rejected_rather_than_left_as_none",
+        ),
     ),
     (
         "#16 SSA cache filename distinguishes the source",
         "src/synthweave/connectors/ssa_names.py",
         "        _cache_filename(source),",
         '        "ssa_names.csv",',
+        (
+            "tests/test_ssa_names.py::test_two_sources_do_not_share_one_cache_file",
+        ),
     ),
     (
         "#13 namedtuple refused rather than flattened into a Choice",
         "src/synthweave/rules.py",
         '    if isinstance(value, tuple) and hasattr(value, "_fields"):',
         "    if False:",
+        (
+            "tests/test_schema_shorthands.py::test_coerce_rule_refuses_a_namedtuple_instead_of_flattening_it",
+        ),
     ),
     (
         "offline: surname weight is count * pct/100",
@@ -359,12 +475,18 @@ MUTATIONS = [
                 * self._data[column].to_numpy(dtype=np.float64)
                 / 100.0""",
         """                self._data["count"].to_numpy(dtype=np.float64)""",
+        (
+            "tests/test_census_surnames.py::test_pool_weights_are_count_times_percent",
+        ),
     ),
     (
         "offline: address fields in a group share one row",
         "src/synthweave/connectors/geonames.py",
         'idx = _hash.integers(keys, seed, f"usaddress\\x00{self.group}", 0, len(self._data))',
         'idx = _hash.integers(keys, seed, f"usaddress\\x00{salt}", 0, len(self._data))',
+        (
+            "tests/test_geonames.py::test_fields_in_one_group_come_from_the_same_real_row",
+        ),
     ),
     (
         "offline: SSA pool narrows to the requested sex",
@@ -372,12 +494,18 @@ MUTATIONS = [
         """        if sex is not None:
             subset = subset[subset["sex"] == sex]""",
         "",
+        (
+            "tests/test_ssa_names.py::test_pooling_a_year_and_sex_narrows_to_that_sex",
+        ),
     ),
     (
         "#37 joint disagreeing with a declared marginal is rejected",
         "src/synthweave/stages/synthesize.py",
         "        _check_joints_agree_with_marginals(self.marginals, self.joints)",
         "        pass",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_joint_disagreeing_with_a_declared_marginal_is_rejected",
+        ),
     ),
     (
         "empty-donor invariant: donor map covers every leaf",
@@ -388,30 +516,45 @@ MUTATIONS = [
         """            self.donors[target] = {
                 leaf: raw[leaves == leaf] for leaf in np.unique(leaves)[1:]
             }""",
+        (
+            "tests/test_fidelity.py::test_no_leaf_is_ever_donorless_however_hard_you_push",
+        ),
     ),
     (
         "#12 carry=* unknown entity raises SchemaError with table context",
         "src/synthweave/schema.py",
         '            raise SchemaError(f"table {table.name!r}: {e.args[0]}") from e',
         "            raise",
+        (
+            "tests/test_schema_shorthands.py::test_carry_star_with_an_unknown_entity_raises_schema_error_naming_the_table",
+        ),
     ),
     (
         "#14 numpy scalars coerce symmetrically",
         "src/synthweave/rules.py",
         "    if isinstance(value, np.generic):\n        return Constant(value.item())",
         "    if False:\n        return Constant(value.item())",
+        (
+            "tests/test_schema_shorthands.py::test_numpy_scalars_coerce_symmetrically",
+        ),
     ),
     (
         "#20 unknown numeric state FIPS code rejected",
         "src/synthweave/connectors/acs_pums.py",
         "        if code not in set(_STATE_FIPS.values()):",
         "        if False:",
+        (
+            "tests/test_acs_pums.py::test_an_unknown_numeric_state_code_is_rejected",
+        ),
     ),
     (
         "#15 malformed structure dict rejected at the coercion",
         "src/synthweave/stages/synthesize.py",
         "        if bad:",
         "        if False:",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_malformed_structure_dict_is_rejected_at_the_coercion",
+        ),
     ),
     (
         "#11 carry=* resolves per schema, not once per table",
@@ -423,138 +566,215 @@ MUTATIONS = [
         """        for table in self.tables:
             if table.carry == "*":
                 table.carry = self._every_attribute_of(table)""",
+        (
+            "tests/test_schema_shorthands.py::test_carry_star_resolves_per_schema_not_once_per_table",
+        ),
     ),
     (
         "#10 per-row rate range check",
         "src/synthweave/stages/noise.py",
         "    if not np.all((rates >= 0.0) & (rates <= 1.0)):",
         "    if False:",
+        (
+            "tests/test_pipeline.py::test_a_row_varying_rate_outside_zero_to_one_fails_loudly",
+        ),
     ),
     (
         "#41 NaN/inf Choice weight rejected instead of collapsing the column",
         "src/synthweave/_hash.py",
         "        if not np.all(np.isfinite(w)):",
         "        if False:",
+        (
+            "tests/test_pipeline.py::test_a_nan_choice_weight_is_rejected_instead_of_collapsing_the_column",
+            "tests/test_pipeline.py::test_an_infinite_choice_weight_is_rejected_instead_of_collapsing_the_column",
+        ),
     ),
     (
         "#43 CSV chunk writer guards column order/shape between chunks",
         "src/synthweave/io.py",
         "            elif list(chunk.columns) != self._csv_columns:",
         "            elif False:",
+        (
+            "tests/test_io.py::test_a_csv_chunk_missing_a_column_is_rejected",
+            "tests/test_io.py::test_csv_chunks_with_reordered_columns_still_land_under_the_right_header",
+        ),
     ),
     (
         "#44 a carried attribute's transitive dependency chain is drawn in full",
         "src/synthweave/stages/generate.py",
         "            if name in needed:\n                needed.update(entity.attributes[name].depends_on())",
         "            pass",
+        (
+            "tests/test_pipeline.py::test_carrying_a_leaf_draws_its_whole_transitive_dependency_chain",
+        ),
     ),
     (
         "#40 CART trees seeded so tied splits break the same way every fit",
         "src/synthweave/stages/synthesize.py",
         "            random_state = int(_hash.hash_key(self.seed, f\"cart\\x00{target}\"), 16) % (2**32)",
         "            random_state = None",
+        (
+            "tests/test_synthesis_and_plugins.py::test_synthesis_is_deterministic_under_tied_splits",
+            "tests/test_synthesis_and_plugins.py::test_multi_column_synthesis_is_deterministic",
+        ),
     ),
     (
         "#42 a noised column keeps its dtype where the values still allow it",
         "src/synthweave/stages/noise.py",
         "                chunk[column] = _restore_dtype(values, original_dtype)",
         "                chunk[column] = values",
+        (
+            "tests/test_noise.py::test_missing_on_an_int_column_widens_to_nullable_int",
+            "tests/test_noise.py::test_missing_on_a_category_column_stays_categorical",
+        ),
     ),
     (
         "#45.1a duplicate table carry names are rejected",
         "src/synthweave/validation.py",
         '    _check_unique(list(table.carry), f"{where} carried attribute")',
         "    pass",
+        (
+            "tests/test_pipeline.py::test_a_table_carrying_the_same_attribute_twice_is_rejected",
+        ),
     ),
     (
         "#45.1b duplicate table identifier names are rejected",
         "src/synthweave/validation.py",
         '    _check_unique(list(table.identifiers), f"{where} identifier")',
         "    pass",
+        (
+            "tests/test_pipeline.py::test_a_table_asking_for_the_same_identifier_twice_is_rejected",
+        ),
     ),
     (
         "#45.2a identifier-width fix drops the erroneous extra digit",
         "src/synthweave/validation.py",
         "    needed = len(str(population * population // 2))",
         "    needed = len(str(population * population // 2)) + 1",
+        (
+            "tests/test_pipeline.py::test_the_recommended_digit_count_is_the_tightest_one_that_works",
+        ),
     ),
     (
         "#45.2b a population past the digit limit says so instead of recommending it",
         "src/synthweave/validation.py",
         "    if needed > MAX_DIGITS:",
         "    if False:",
+        (
+            "tests/test_pipeline.py::test_a_population_needing_more_than_18_digits_says_so_instead_of_recommending_one",
+        ),
     ),
     (
         "#45.3 Uniform rejects high <= low instead of silently descending",
         "src/synthweave/rules.py",
         "        if self.high <= self.low:",
         "        if False:",
+        (
+            "tests/test_pipeline.py::test_uniform_with_high_not_above_low_is_rejected",
+        ),
     ),
     (
         "#46.1 two joints sharing a column are rejected",
         "src/synthweave/stages/synthesize.py",
         "        _check_joints_do_not_share_a_column(self.joints)\n        _check_joints_agree_with_marginals(self.marginals, self.joints)",
         "        _check_joints_agree_with_marginals(self.marginals, self.joints)",
+        (
+            "tests/test_synthesis_and_plugins.py::test_two_joints_sharing_a_column_are_rejected",
+        ),
     ),
     (
         "#46.2 a numeric Prior marginal carries its natural dtype",
         "src/synthweave/stages/synthesize.py",
         "            frame[column] = picked.astype(natural) if natural.kind in \"iuf\" else picked",
         "            frame[column] = picked",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_numeric_prior_marginal_stays_numeric",
+        ),
     ),
     (
         "#46.3 fit_cap holds for a supplied structure source across seeds",
         "src/synthweave/stages/synthesize.py",
         "                    train = train.iloc[:cap]",
         "                    keys = np.asarray(train.index, dtype=str).astype(object)\n                    pick = _hash.unit(keys, ctx.seed, f\"fitsample\\x00{table.name}\") < (cap / len(train))\n                    train = train.loc[pick]",
+        (
+            "tests/test_synthesis_and_plugins.py::test_fit_cap_holds_across_seeds_for_a_supplied_structure_source",
+        ),
     ),
     (
         "#64 check_rule catches a non-deterministic rule",
         "src/synthweave/rules.py",
         '    repeat = rule.draw(keys, seed=seed, salt=salt, frame=frame)\n    _assert_same_values(\n        keys, baseline, repeat, "calling draw() twice with identical input gave different "\n        "values back (the rule is not deterministic, e.g. it reaches for random state)"\n    )',
         "    pass",
+        (
+            "tests/test_conformance.py::test_a_non_deterministic_rule_is_rejected",
+        ),
     ),
     (
         "#64 check_rule catches a position-keyed rule via a shuffled key array",
         "src/synthweave/rules.py",
         "    order = np.arange(n)[::-1]",
         "    order = np.arange(n)",
+        (
+            "tests/test_conformance.py::test_a_row_position_keyed_rule_is_rejected",
+        ),
     ),
     (
         "#64 check_rule catches a chunk-size-dependent rule via a split call",
         "src/synthweave/rules.py",
         '    combined = np.concatenate([first, second])\n    _assert_same_values(\n        keys, baseline, combined, "splitting the keys across two calls changed a value "\n        "(the rule is not chunk invariant, e.g. it reads chunk-level state)"\n    )',
         "    pass",
+        (
+            "tests/test_conformance.py::test_a_chunk_size_dependent_rule_is_rejected",
+        ),
     ),
     (
         "#89.1 two attributes sharing one ACS variable both keep a column",
         "src/synthweave/mode.py",
         "            self._fetched = pd.DataFrame(\n                {name: fetched[variable] for name, variable in self._variables.items()}\n            )",
         "            self._fetched = fetched.rename(\n                columns={variable: name for name, variable in self._variables.items()}\n            )",
+        (
+            "tests/test_mode.py::test_two_attributes_can_share_one_acs_variable",
+        ),
     ),
     (
         "#89.2 scope mode generalizes by epsilon instead of CART's defaults",
         "src/synthweave/mode.py",
         '            "synthesizer": _epsilon_chain(self._scope_epsilon, self._fetched, placement)',
         '            "synthesizer": _empirical_cart(list(self._variables), self._fetched)',
+        (
+            "tests/test_mode.py::test_scope_epsilon_sets_the_synthesizers_max_depth_knob",
+            "tests/test_mode.py::test_scope_attributes_at_different_epsilons_get_two_synthesizers",
+        ),
     ),
     (
         "#89.3 scope epsilon is validated, not clamped (mode level)",
         "src/synthweave/mode.py",
         '        _check_epsilon(epsilon, "scope")\n',
         "",
+        (
+            "tests/test_mode.py::test_scope_rejects_a_non_positive_epsilon[-1]",
+            "tests/test_mode.py::test_scope_rejects_a_non_positive_epsilon[0]",
+        ),
     ),
     (
         "#89.4 scope epsilon is validated, not clamped (per attribute)",
         "src/synthweave/mode.py",
         '        if epsilon is not None:\n            _check_epsilon(epsilon, f"attribute {name!r}")\n        self._variables[name] = variable',
         "        self._variables[name] = variable",
+        (
+            "tests/test_mode.py::test_scope_rejects_a_non_positive_per_attribute_epsilon[0]",
+            "tests/test_mode.py::test_scope_rejects_a_non_positive_per_attribute_epsilon[-1]",
+        ),
     ),
     (
         "#88 non-positive real_data epsilon rejected instead of clamped to 0.01",
         "src/synthweave/mode.py",
         '    if epsilon <= 0:\n        raise ValueError(f"{where}: epsilon must be positive, got {epsilon!r}")',
         "    pass",
+        (
+            "tests/test_mode.py::test_real_data_rejects_a_non_positive_epsilon[0]",
+            "tests/test_mode.py::test_real_data_rejects_a_non_positive_epsilon[-1]",
+        ),
     ),
     (
         "#88 a stray attribute kwarg in real_data mode is named, not a bare TypeError",
@@ -567,6 +787,9 @@ MUTATIONS = [
             )
 """,
         "",
+        (
+            "tests/test_mode.py::test_attribute_rejects_an_unknown_kwarg_naming_the_attribute",
+        ),
     ),
     (
         "N2 a stray attribute kwarg in scope mode is named, not a bare TypeError",
@@ -579,6 +802,10 @@ MUTATIONS = [
             )
 """,
         "",
+        (
+            "tests/test_mode.py::test_scope_rejects_an_unknown_kwarg_naming_the_attribute",
+            "tests/test_mode.py::test_scope_rejects_a_misspelled_noise_rate_rather_than_dropping_it",
+        ),
     ),
     (
         "#87 mode noise resolves against the schema's expanded carry (carry=*)",
@@ -587,6 +814,9 @@ MUTATIONS = [
         """            for column_name in list(table.columns) + (
                 list(table.carry) if isinstance(table.carry, list) else []
             ):""",
+        (
+            "tests/test_mode.py::test_missing_rate_reaches_a_column_carried_by_wildcard",
+        ),
     ),
     (
         "#87 a mode noise rate declared after table() still reaches the table",
@@ -616,18 +846,28 @@ MUTATIONS = [
             identifiers=identifiers or (),
             coverage=coverage,
         )""",
+        (
+            "tests/test_mode.py::test_missing_rate_reaches_a_column_declared_after_the_table",
+        ),
     ),
     (
         "#48 unregister actually removes the entry",
         "src/synthweave/registry.py",
         "    del table[name]",
         "    pass",
+        (
+            "tests/test_registry.py::test_unregister_removes_an_entry",
+        ),
     ),
     (
         "#48 the autouse registry-reset fixture restores the pre-test snapshot",
         "tests/conftest.py",
         "    registry._restore(snapshot)",
         "    pass",
+        (
+            "tests/test_registry.py::test_a_registration_here_does_not_survive_to_the_next_test",
+            "tests/test_registry.py::test_the_previous_tests_registration_did_not_leak",
+        ),
     ),
     (
         "#60 PackageNotFoundError stays out of the public namespace",
@@ -648,12 +888,19 @@ MUTATIONS = [
         "from importlib.metadata import version as _installed_version\n"
         "\n"
         "_PackageNotFoundError = PackageNotFoundError",
+        (
+            "tests/test_public_api.py::test_no_public_name_is_a_foreign_import",
+        ),
     ),
     (
         "#63 faker_names validates Faker's private provider shape",
         "src/synthweave/connectors/faker_names.py",
         "    pool: Any = _checked_provider_pool(Provider, attr)",
         "    pool: Any = getattr(Provider, attr)",
+        (
+            "tests/test_faker_names.py::test_unweighted_provider_attribute_is_rejected_by_name",
+            "tests/test_faker_names.py::test_missing_provider_attribute_names_the_attribute_and_the_version",
+        ),
     ),
     (
         "#63 faker_names weight check separates non-numeric, non-finite and non-positive",
@@ -665,6 +912,10 @@ MUTATIONS = [
         "        if not weight > 0:",
         "        if not isinstance(weight, (int, float)) or isinstance(weight, bool)"
         " or not weight > 0:",
+        (
+            "tests/test_faker_names.py::test_unusable_weight_is_rejected_and_the_message_says_why[inf-non-finite]",
+            "tests/test_faker_names.py::test_unusable_weight_is_rejected_and_the_message_says_why[0.01-non-numeric]",
+        ),
     ),
     (
         "#62 I32 the ACS response is parsed before it is cached",
@@ -678,6 +929,9 @@ MUTATIONS = [
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(payload))
     return _to_frame(payload, variables, url)""",
+        (
+            "tests/test_acs_pums.py::test_a_response_that_fails_to_parse_is_not_cached",
+        ),
     ),
     (
         "#62 I33 the .env walk stops at the project root",
@@ -686,6 +940,9 @@ MUTATIONS = [
             break
 """,
         "",
+        (
+            "tests/test_acs_pums.py::test_dotenv_lookup_stops_at_the_project_root",
+        ),
     ),
     (
         "#62 I33 the project root's own .env is read before the walk stops",
@@ -696,6 +953,9 @@ MUTATIONS = [
         if any((directory / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
             break
         candidate = directory / ".env\"""",
+        (
+            "tests/test_acs_pums.py::test_dotenv_at_the_project_root_is_read_before_the_walk_stops",
+        ),
     ),
     (
         "#47 a noise rate function must return one rate per row",
@@ -704,12 +964,19 @@ MUTATIONS = [
 """,
         """    if False:
 """,
+        (
+            "tests/test_pipeline.py::test_a_row_varying_rate_stays_deterministic_and_chunk_invariant",
+        ),
     ),
     (
         "#96.2 an ExtensionDtype is restored through pandas, not ndarray.astype",
         "src/synthweave/stages/synthesize.py",
         "        if isinstance(dtype, pd.api.extensions.ExtensionDtype):\n            return pd.array(values, dtype=dtype)\n",
         "",
+        (
+            "tests/test_synthesis_and_plugins.py::test_a_synthesized_column_keeps_an_extension_dtype[Int64]",
+            "tests/test_synthesis_and_plugins.py::test_a_synthesized_column_keeps_an_extension_dtype[category]",
+        ),
     ),
     # --- #65 the derivation layer ------------------------------------------
     # Every value in the library routes through `_hash`, so a corruption here
@@ -733,24 +1000,39 @@ MUTATIONS = [
         "src/synthweave/_hash.py",
         'hash_key=hash_key(seed, salt)',
         'hash_key=hash_key(seed, "")',
+        (
+            "tests/test_geonames.py::test_a_separate_group_is_independent_of_the_first",
+            "tests/test_pipeline.py::test_identifier_kinds_are_independent",
+        ),
     ),
     (
         "#65 unit() divides by the full uint64 width",
         "src/synthweave/_hash.py",
         "_SCALE = np.float64(2.0**64)",
         "_SCALE = np.float64(2.0**63)",
+        (
+            "tests/test_hash_invariants.py::test_an_unweighted_choice_reaches_every_value_it_was_given",
+            "tests/test_pipeline.py::test_missingness_lands_near_the_configured_rate",
+        ),
     ),
     (
         "#65 integers() span excludes `high`",
         "src/synthweave/_hash.py",
         "    span = np.uint64(high - low)",
         "    span = np.uint64(high - low + 1)",
+        (
+            "tests/test_pipeline.py::test_event_grain_varies_row_count_per_entity",
+            "tests/test_faker_names.py::test_ssn_area_within_valid_range",
+        ),
     ),
     (
         "#65 normal() Box-Muller radius keeps the -2 factor",
         "src/synthweave/_hash.py",
         "    z = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
         "    z = np.sqrt(-1.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
+        (
+            "tests/test_hash_invariants.py::test_normal_draws_have_the_requested_spread",
+        ),
     ),
     (
         # Pinned (#156). The sole catcher was a KeyError for an unmapped
@@ -767,24 +1049,36 @@ MUTATIONS = [
         "src/synthweave/_hash.py",
         "        idx = np.searchsorted(np.cumsum(w / total), u, side=\"right\")",
         "        idx = np.searchsorted(np.cumsum(w), u, side=\"right\")",
+        (
+            "tests/test_census_surnames.py::test_the_drawn_name_actually_follows_the_race_column",
+        ),
     ),
     (
         "#65 derive_id() zero-pads to the declared width",
         "src/synthweave/_hash.py",
         '    text = np.char.zfill(n.astype("U"), digits)',
         '    text = n.astype("U")',
+        (
+            "tests/test_pipeline.py::test_identifiers_all_have_the_requested_width",
+        ),
     ),
     (
         "#65 derive_id() uses the full declared keyspace",
         "src/synthweave/_hash.py",
         "    modulus = 10**digits",
         "    modulus = 10 ** (digits - 1)",
+        (
+            "tests/test_hash_invariants.py::test_identifiers_use_the_whole_declared_keyspace",
+        ),
     ),
     (
         "#65 derive_id() namespaces by tag, so two tags are unrelated",
         "src/synthweave/_hash.py",
         '    n = (hash_u64(keys, seed, f"id\\x00{tag}") % np.uint64(modulus)).astype(np.int64)',
         '    n = (hash_u64(keys, seed, "id") % np.uint64(modulus)).astype(np.int64)',
+        (
+            "tests/test_pipeline.py::test_identifier_kinds_are_independent",
+        ),
     ),
     # --- #65 subtler corruptions of already-mutated code --------------------
     # The existing entries for these lines only delete the guard. A wrong
@@ -795,18 +1089,27 @@ MUTATIONS = [
         "src/synthweave/validation.py",
         "TOLERABLE_COLLISIONS = 1",
         "TOLERABLE_COLLISIONS = 1000",
+        (
+            "tests/test_pipeline.py::test_a_digit_count_too_small_for_the_population_is_rejected",
+        ),
     ),
     (
         "#65 the collision bound is quadratic in population (birthday bound)",
         "src/synthweave/validation.py",
         "    return population * population / (2 * 10**digits)",
         "    return population / (2 * 10**digits)",
+        (
+            "tests/test_pipeline.py::test_a_population_needing_more_than_18_digits_says_so_instead_of_recommending_one",
+        ),
     ),
     (
         "#65 own() copies a frame pandas flagged as a copy, not only a view",
         "src/synthweave/stages/base.py",
         '    if getattr(chunk, "_is_view", False) or getattr(chunk, "_is_copy", None) is not None:',
         '    if getattr(chunk, "_is_view", False):',
+        (
+            "tests/test_synthesis_and_plugins.py::test_own_makes_a_view_safe_to_write_to",
+        ),
     ),
     (
         # Retargeted 2026-08-04: #82 moved the empty-table build into
@@ -816,12 +1119,18 @@ MUTATIONS = [
         "src/synthweave/pipeline.py",
         "            columns=columns,\n        )",
         "            columns=sorted(columns),\n        )",
+        (
+            "tests/test_pipeline.py::test_a_table_that_emits_no_rows_still_has_its_columns",
+        ),
     ),
     (
         "#142 check_synthesizer names the dropped row key instead of raising KeyError",
         "src/synthweave/conformance.py",
         "    if ROW_KEY not in got.columns:",
         "    if False:",
+        (
+            "tests/test_synthesizer_conformance.py::test_a_synthesizer_dropping_the_row_key_is_rejected",
+        ),
     ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
@@ -832,6 +1141,10 @@ MUTATIONS = [
         "pyproject.toml",
         'pii = ["Faker>=20,<41"]',
         'pii = ["Faker>=20,<42"]',
+        (
+            "tests/test_faker_bound_sync.py::test_source_constant_matches_the_bound_declared_in_pyproject",
+            "tests/test_faker_bound_sync.py::test_the_runtime_error_names_the_bound_declared_in_pyproject",
+        ),
     ),
     (
         # Not a fix, a guarantee. `_entities_per_chunk` chunks over entities so
@@ -883,6 +1196,10 @@ MUTATIONS = [
         level += 1
     return level""",
         """    return 2""",
+        (
+            "tests/test_deprecation.py::test_find_stack_level_is_one_when_called_from_outside_the_package",
+            "tests/test_deprecation.py::test_nested_package_helpers_and_comprehensions_are_walked_over",
+        ),
     ),
     (
         "#81 Typo corrupts a value whose script has no keyboard map",
@@ -899,6 +1216,10 @@ MUTATIONS = [
             repl = options[j % len(options)]
             out[i] = text[:j] + (repl.upper() if ch.isupper() else repl) + text[j + 1 :]
 """,
+        (
+            "tests/test_pipeline.py::test_typo_corrupts_a_value_with_no_latin_characters",
+            "tests/test_noise.py::test_typo_delivers_the_configured_rate_on_every_script",
+        ),
     ),
     (
         "I41 a noised ExtensionDtype column keeps its dtype",
@@ -910,6 +1231,9 @@ MUTATIONS = [
             return restored
 """,
         "",
+        (
+            "tests/test_noise.py::test_missing_on_a_category_column_stays_categorical",
+        ),
     ),
     (
         # #134. The entry above deletes the whole ExtensionDtype block, so the
@@ -938,6 +1262,9 @@ MUTATIONS = [
             columns=columns,
         )""",
         "        return pd.DataFrame(columns=columns)",
+        (
+            "tests/test_pipeline.py::test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes",
+        ),
     ),
     # Reverting either of these puts the leak guard back exactly as PR #106
     # merged it, which is the state where `aws_secret_access_key=...` and a
@@ -950,36 +1277,54 @@ MUTATIONS = [
         "tools/check_no_private_leak.py",
         r'    r"(?:KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
         r'    r"(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"',
+        (
+            "tests/test_leak_guard.py::test_compound_credential_names_are_caught[census_key=0123456789abcdef0123456789abcdef01234567]",  # leak-guard: allow (a pytest node id, and the value is the leak guard's own fake fixture)
+        ),
     ),
     (
         "#153 name parts after the stem, so `secret_key_base=` is a credential",
         "tools/check_no_private_leak.py",
         r'    r"(?:_[A-Z0-9]+)*\b"',
         r'    r"\b"',
+        (
+            "tests/test_leak_guard.py::test_compound_credential_names_are_caught[secret_key_base=0123456789abcdef0123456789abcdef01234567]",  # leak-guard: allow (a pytest node id, and the value is the leak guard's own fake fixture)
+        ),
     ),
     (
         "#153 a 12-character value with a digit is credential-shaped",
         "tools/check_no_private_leak.py",
         r"[A-Za-z0-9_\-]{12,}|",
         r"[A-Za-z0-9_\-]{20,}|",
+        (
+            "tests/test_leak_guard.py::test_compound_credential_names_are_caught[API_KEY=abc123def456ghi7]",  # leak-guard: allow (a pytest node id, and the value is the leak guard's own fake fixture)
+        ),
     ),
     (
         "#154 src/, tests/ and examples/ are not exempt from the personal shapes",
         "tools/check_no_private_leak.py",
         "    patterns = _UNIVERSAL_PATTERNS + _PERSONAL_PATTERNS",
         "    patterns = _UNIVERSAL_PATTERNS",
+        (
+            "tests/test_leak_guard.py::test_a_real_person_in_the_package_is_caught",
+        ),
     ),
     (
         "#139 later epsilon groups condition on the columns earlier ones produced",
         "src/synthweave/mode.py",
         "                    predictors=list(conditioned),\n",
         "",
+        (
+            "tests/test_mode.py::test_two_attributes_at_different_epsilons_keep_the_donors_joint_structure",
+        ),
     ),
     (
         "#144 a real column is scoped to the tables that declared it",
         "src/synthweave/mode.py",
         "                    tables=[table_name],\n",
         "",
+        (
+            "tests/test_mode.py::test_a_real_data_column_stays_out_of_a_table_that_did_not_declare_it",
+        ),
     ),
     (
         "#144 a real attribute no table carries raises instead of reaching all of them",
@@ -990,12 +1335,18 @@ MUTATIONS = [
         """    unmatched = []
     if unmatched:
         raise ValueError(""",
+        (
+            "tests/test_mode.py::test_a_real_data_attribute_no_table_carries_raises_naming_it",
+        ),
     ),
     (
         "#144 a real attribute bound under another name raises, not an all-null column",
         "src/synthweave/mode.py",
         "        if isinstance(rule, _RealDataColumn) and rule.name != bound:",
         "        if False:",
+        (
+            "tests/test_mode.py::test_binding_a_real_data_attribute_under_another_name_raises_naming_both",
+        ),
     ),
     (
         "#145 each epsilon group records under its own provenance/report key",
@@ -1004,6 +1355,10 @@ MUTATIONS = [
         '        stage = "synthesize" + (f".{self.label}" if self.label else "")',
         '        prefix = f"{table.name}.synth"\n'
         '        stage = "synthesize"',
+        (
+            "tests/test_mode.py::test_a_two_epsilon_run_records_both_generalization_levels",
+            "tests/test_mode.py::test_a_two_epsilon_run_reports_both_fits_without_colliding",
+        ),
     ),
     (
         "#145 an epsilon-derived leaf size is user-provided, not a library default",
@@ -1012,6 +1367,9 @@ MUTATIONS = [
             max(5, round(100 / capped)), f"derived from epsilon={epsilon!r}"
         ),""",
         '        "min_samples_leaf": max(5, round(100 / capped)),',
+        (
+            "tests/test_mode.py::test_an_epsilon_derived_leaf_size_is_not_reported_as_a_library_default",
+        ),
     ),
     (
         # The exact mutation #143 reported as invisible: epsilon becomes a total
@@ -1021,6 +1379,9 @@ MUTATIONS = [
         "src/synthweave/mode.py",
         "    capped = min(max(epsilon, 0.01), 5.0)",
         "    capped = 5.0",
+        (
+            "tests/test_mode.py::test_epsilon_changes_the_synthesized_data_not_only_the_knob_values",
+        ),
     ),
     # A non-release tag sharing the release commit (this repo had
     # `archive/bug-hunt`) makes `git describe --exact-match` return it, which
@@ -1031,6 +1392,9 @@ MUTATIONS = [
         "tools/release_notes.py",
         '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
         '    current = _git("describe", "--tags", "--exact-match").strip()',
+        (
+            "tests/test_release_notes.py::test_the_range_ignores_a_non_release_tag_on_the_release_commit",
+        ),
     ),
     # #150: both checkers refuse to certify a clause that had no chunk
     # boundary to inspect. Mutated at the call sites rather than inside
@@ -1044,6 +1408,9 @@ MUTATIONS = [
         "src/synthweave/conformance.py",
         "        sum(1 for chunk in split if len(chunk)),",
         "        2,",
+        (
+            "tests/test_generator_conformance.py::test_a_split_size_that_does_not_split_is_refused",
+        ),
     ),
     (
         "#150 check_synthesizer refuses a split_chunk_size that produced no boundary",
@@ -1054,6 +1421,9 @@ MUTATIONS = [
         "    _require_a_chunk_boundary(\n"
         '        2, split_chunk_size, "clause 5 (chunk invariance)"\n'
         "    )",
+        (
+            "tests/test_synthesizer_conformance.py::test_a_split_size_that_does_not_split_is_refused",
+        ),
     ),
     # The exact line #125 reported: `write_empty` rebuilding its own stand-in
     # frame instead of writing the typed one the pipeline handed it. Invisible
@@ -1066,6 +1436,9 @@ MUTATIONS = [
         "        empty = pd.DataFrame(\n"
         "            {name: pd.Series(dtype=object) for name in self.empty.columns}\n"
         "        )\n",
+        (
+            "tests/test_io.py::test_a_parquet_file_for_a_table_with_no_rows_keeps_its_declared_schema",
+        ),
     ),
     # #137's occurrence half: the grain column loses its stand-in rule and goes
     # back to `object` on a zero-row run against `int64` populated.
@@ -1074,6 +1447,9 @@ MUTATIONS = [
         "src/synthweave/pipeline.py",
         "    return _GrainColumn(np.arange(0).dtype) if isinstance(grain, PerEvent) else None",
         "    return None",
+        (
+            "tests/test_pipeline.py::test_an_empty_event_table_keeps_the_occurrence_dtype_of_a_populated_one",
+        ),
     ),
     # #101's shape check passes a chunk-derived rate that was broadcast back to
     # one value per row, so without the behavioural split every row silently
@@ -1084,6 +1460,9 @@ MUTATIONS = [
         "src/synthweave/stages/noise.py",
         "    _check_row_wise(fn, chunk, rates, path)\n",
         "",
+        (
+            "tests/test_pipeline.py::test_a_chunk_derived_rate_of_the_right_length_is_refused",
+        ),
     ),
     # The two directions this exemption can fail in, pinned separately.
     # Reverting the first puts the email shape back as PR #164 merged it, where
