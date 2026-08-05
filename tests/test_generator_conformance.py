@@ -114,9 +114,12 @@ class RowChunkedGenerator:
         # provably lands inside one entity rather than between two.
         cut = next((i for i in range(1, len(keys)) if keys[i] == keys[i - 1]), None)
         if cut is None:
-            # PerEntity grain: one row per entity, so no cut can straddle.
-            yield rows
-            return
+            # PerEntity grain: one row per entity, so no cut can straddle. Cut
+            # in the middle anyway rather than yielding one chunk, so the
+            # harness still has a real boundary to inspect. Emitting a single
+            # chunk here would trip the refusal added for #150 and the test
+            # below would stop proving what it is for.
+            cut = max(1, len(rows) // 2)
         yield rows.iloc[:cut].reset_index(drop=True)
         yield rows.iloc[cut:].reset_index(drop=True)
 
@@ -241,6 +244,53 @@ def test_the_table_argument_may_be_omitted_for_a_single_table_schema(careers):
 def test_a_multi_table_schema_must_name_its_table(grains):
     with pytest.raises(ValueError, match="pass table="):
         sw.check_generator(sw.RuleGenerator(), grains)
+
+
+@pytest.fixture
+def tiny() -> sw.Schema:
+    """Four entities: too few for the default `split_chunk_size` to cut.
+
+    Chunking is over entities, and `RuleGenerator` sizes its stride as
+    `chunk_size // rows_per_entity`, so at 13 this whole table lands in one
+    chunk. A small schema is the natural thing to iterate against, which is
+    what makes the gap it exposes expensive.
+    """
+    person = sw.Entity(
+        "person",
+        count=4,
+        attributes={"e": sw.Choice(["a", "b"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "small",
+        grain=sw.PerEvent("person", low=1, high=3),
+        carry=["e"],
+        columns={"c": sw.Uniform(0, 1)},
+    )
+    return sw.Schema(entities=[person], tables=[table], seed=1)
+
+
+def test_a_split_size_that_does_not_split_is_refused(tiny):
+    """The bug this closes: a conforming-looking pass over two clauses that
+    examined nothing.
+
+    Clauses 3 and 4 are both about what happens at a chunk boundary. Before
+    this guard, a schema too small for `split_chunk_size` to cut produced one
+    chunk, both clauses passed having seen no boundary, and `check_generator`
+    returned `None` exactly as it does for a generator it genuinely verified.
+    A caller error, so `ValueError` rather than `GeneratorConformanceError`:
+    the generator did nothing wrong, the harness was configured so that it
+    could not be tested.
+    """
+    with pytest.raises(ValueError, match="split_chunk_size"):
+        sw.check_generator(sw.RuleGenerator(), tiny)
+
+
+def test_a_split_size_small_enough_to_cut_the_tiny_schema_is_accepted(tiny):
+    """The refusal above is fixable from the message, and this is the fix it
+    names. Without this, the guard could be refusing every small schema
+    outright rather than refusing only the sizes that cannot split one."""
+    sw.check_generator(sw.RuleGenerator(), tiny, split_chunk_size=1)
 
 
 # --- over the registry ------------------------------------------------------

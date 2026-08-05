@@ -52,6 +52,16 @@ class RowDropper(KeyedSynth):
             yield chunk.iloc[::2]
 
 
+class RowKeyDropper(KeyedSynth):
+    """Strips the reserved row key. It reads as internal bookkeeping, so this
+    is an easy mistake, and the harness has to name it rather than let a bare
+    `KeyError` out of its own internals."""
+
+    def run(self, chunks, table, ctx):
+        for chunk in super().run(chunks, table, ctx):
+            yield chunk.drop(columns=["_sw_row"])
+
+
 class RowShuffler(KeyedSynth):
     """Keeps every row but hands them back in a different order. The row
     count alone cannot see this, which is why the check reads the row key."""
@@ -77,17 +87,33 @@ def test_a_conforming_synthesizer_passes(careers):
 
 
 def test_a_row_dropping_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="rows"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*how many rows"
+    ):
         sw.check_synthesizer(RowDropper(), careers)
 
 
+def test_a_synthesizer_dropping_the_row_key_is_rejected(careers):
+    """The failure mode this replaces: `_check_rows_survive` indexed
+    `got[ROW_KEY]` unguarded, so this candidate escaped as a bare
+    `KeyError: '_sw_row'` raised from inside the harness. A plugin author got
+    the column name and nothing about which guarantee they had broken.
+    """
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*reserved row key"
+    ):
+        sw.check_synthesizer(RowKeyDropper(), careers)
+
+
 def test_a_row_reordering_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="reordered the rows"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^rows survive:.*reordered the rows"
+    ):
         sw.check_synthesizer(RowShuffler(), careers)
 
 
 def test_a_column_inventing_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="column"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^columns survive:"):
         sw.check_synthesizer(ColumnInventor(), careers)
 
 
@@ -103,7 +129,9 @@ class Meddler(KeyedSynth):
 
 
 def test_a_synthesizer_writing_an_undeclared_column_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="did not declare"):
+    with pytest.raises(
+        sw.SynthesizerConformanceError, match=r"^undeclared columns untouched:"
+    ):
         sw.check_synthesizer(Meddler(), careers)
 
 
@@ -119,7 +147,7 @@ class RandomSynth(KeyedSynth):
 
 
 def test_a_non_deterministic_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="not deterministic"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^determinism:"):
         sw.check_synthesizer(RandomSynth(), careers)
 
 
@@ -136,7 +164,7 @@ class ChunkCounter(KeyedSynth):
 
 
 def test_a_chunk_size_dependent_synthesizer_is_rejected(careers):
-    with pytest.raises(sw.SynthesizerConformanceError, match="chunk invariant"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^chunk invariance:"):
         sw.check_synthesizer(ChunkCounter(), careers)
 
 
@@ -157,7 +185,7 @@ class ShrinkingSynth(KeyedSynth):
 def test_a_synthesizer_whose_runs_disagree_in_shape_is_rejected(careers):
     """The shape mismatch is reported as the determinism failure it is,
     rather than surfacing as a length error from the value comparison."""
-    with pytest.raises(sw.SynthesizerConformanceError, match="not deterministic"):
+    with pytest.raises(sw.SynthesizerConformanceError, match=r"^determinism:"):
         sw.check_synthesizer(ShrinkingSynth(), careers)
 
 
@@ -256,3 +284,44 @@ def test_a_synthesizer_that_does_not_say_what_it_writes_is_refused(careers):
     with pytest.raises(ValueError, match="columns="):
         sw.check_synthesizer(Anonymous(), careers)
     sw.check_synthesizer(Anonymous(), careers, columns=["wage"])
+
+
+@pytest.fixture
+def tiny() -> sw.Schema:
+    """Three entities: too few for the default `split_chunk_size` to cut.
+
+    `check_generator` had the same hole on the same fixture shape (issue
+    #150), and the reason is shared: chunking is over entities, so a table
+    with few enough of them lands in one chunk however the size is set.
+    """
+    person = sw.Entity(
+        "person",
+        count=3,
+        attributes={"e": sw.Choice(["a", "b"], [0.5, 0.5])},
+        identifiers=[sw.Identifier("tax_id")],
+    )
+    table = sw.Table(
+        "small",
+        grain=sw.PerEvent("person", low=1, high=3),
+        carry=["e"],
+        columns={"wage": sw.Uniform(0, 1)},
+    )
+    return sw.Schema(entities=[person], tables=[table], seed=1)
+
+
+def test_a_split_size_that_does_not_split_is_refused(tiny):
+    """Clause 5 is about what happens across a chunk boundary, so a
+    `split_chunk_size` that leaves the whole table in one chunk compares a run
+    against itself and passes having tested nothing. The same gap #150 found
+    in `check_generator`, and refused the same way: a caller error, so
+    `ValueError`, not `SynthesizerConformanceError`.
+    """
+    with pytest.raises(ValueError, match="split_chunk_size"):
+        sw.check_synthesizer(KeyedSynth(), tiny)
+
+
+def test_a_split_size_small_enough_to_cut_the_tiny_schema_is_accepted(tiny):
+    """The refusal names a fix, and this is it. Without this the guard could
+    be refusing every small schema rather than only the sizes that cannot
+    split one."""
+    sw.check_synthesizer(KeyedSynth(), tiny, split_chunk_size=1)

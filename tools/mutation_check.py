@@ -776,6 +776,12 @@ MUTATIONS = [
         "            columns=columns,\n        )",
         "            columns=sorted(columns),\n        )",
     ),
+    (
+        "#142 check_synthesizer names the dropped row key instead of raising KeyError",
+        "src/synthweave/conformance.py",
+        "    if ROW_KEY not in got.columns:",
+        "    if False:",
+    ),
     # Bumps `pyproject.toml` and nothing else -- the exact drift this guard
     # exists for. Like every entry here the snippet is a literal snapshot, so a
     # real bound change makes this STALE, which fails the run and points at the
@@ -960,6 +966,49 @@ MUTATIONS = [
         "tools/release_notes.py",
         '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
         '    current = _git("describe", "--tags", "--exact-match").strip()',
+    ),
+    # #150: both checkers refuse to certify a clause that had no chunk
+    # boundary to inspect. Mutated at the call sites rather than inside
+    # `_require_a_chunk_boundary`, because one mutation of the shared helper
+    # would disable both refusals at once and could then be caught by either
+    # test. Feeding a hardcoded 2 leaves the helper intact and switches off
+    # exactly one checker's refusal, so each entry is pinned by the test for
+    # that checker and nothing else.
+    (
+        "#150 check_generator refuses a split_chunk_size that produced no boundary",
+        "src/synthweave/conformance.py",
+        "        sum(1 for chunk in split if len(chunk)),",
+        "        2,",
+    ),
+    (
+        "#150 check_synthesizer refuses a split_chunk_size that produced no boundary",
+        "src/synthweave/conformance.py",
+        "    _require_a_chunk_boundary(\n"
+        '        split_chunks, split_chunk_size, "clause 5 (chunk invariance)"\n'
+        "    )",
+        "    _require_a_chunk_boundary(\n"
+        '        2, split_chunk_size, "clause 5 (chunk invariance)"\n'
+        "    )",
+    ),
+    # The exact line #125 reported: `write_empty` rebuilding its own stand-in
+    # frame instead of writing the typed one the pipeline handed it. Invisible
+    # on CSV, baked into the file on Parquet, where every column comes back as
+    # the `null` type on a run that happened to cover no entity.
+    (
+        "#125 an empty table's Parquet file keeps the schema its rules declare",
+        "src/synthweave/io.py",
+        "        empty = self.empty\n",
+        "        empty = pd.DataFrame(\n"
+        "            {name: pd.Series(dtype=object) for name in self.empty.columns}\n"
+        "        )\n",
+    ),
+    # #137's occurrence half: the grain column loses its stand-in rule and goes
+    # back to `object` on a zero-row run against `int64` populated.
+    (
+        "#137 an empty event table keeps its grain column's declared dtype",
+        "src/synthweave/pipeline.py",
+        "    return _GrainColumn(np.arange(0).dtype) if isinstance(grain, PerEvent) else None",
+        "    return None",
     ),
     # #101's shape check passes a chunk-derived rate that was broadcast back to
     # one value per row, so without the behavioural split every row silently

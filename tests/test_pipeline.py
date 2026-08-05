@@ -896,6 +896,107 @@ def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
     )
 
 
+def _grain_pair(grain, columns, carry=()):
+    """The same table twice, once emitting rows and once not, as a
+    (empty, populated) pair of results. Only `coverage` differs, so any
+    difference in dtypes is caused by the row count and nothing else."""
+    person = sw.Entity(
+        "person",
+        count=6,
+        attributes={
+            "education": sw.Choice(["HS", "College"], [0.6, 0.4]),
+            "wage": sw.Uniform(1.0, 2.0),
+        },
+    )
+    frames = []
+    for coverage in (0.0001, 1.0):
+        table = sw.Table(
+            "t", grain=grain, carry=list(carry), columns=columns, coverage=coverage
+        )
+        schema = sw.Schema(entities=[person], tables=[table], seed=4)
+        frames.append(sw.Pipeline(schema).run()["t"])
+    empty, populated = frames
+    assert len(empty) == 0 and len(populated) > 0
+    return empty, populated
+
+
+def test_an_empty_event_table_keeps_the_occurrence_dtype_of_a_populated_one():
+    """`PerEvent`'s occurrence column is the grain's, not a rule's.
+
+    #82 typed every column whose rule declares a dtype, which left this one
+    `object` empty against `int64` populated: a grain is not a rule and
+    declares nothing. It does not have to. `stages/generate.py::_expand`
+    builds occurrence with `np.arange`, so numpy fixes the type and no config
+    can move it, which makes it knowable at zero rows unlike a `Choice` over
+    strings.
+
+    This test is what stops the two drifting: if the generator ever built
+    occurrence some other way, the populated side would move and this would
+    go red rather than the empty path quietly being wrong.
+    """
+    empty, populated = _grain_pair(
+        sw.PerEvent("person"), {"score": sw.Integer(0, 100)}, carry=["education"]
+    )
+
+    assert empty["occurrence"].dtype == populated["occurrence"].dtype, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
+def test_an_empty_period_table_keeps_the_period_dtype_of_a_populated_one():
+    """The same claim for `PerPeriod`, which needed no change to hold.
+
+    `_expand` builds the period column with `np.asarray(periods, dtype=object)`,
+    so a populated run is `object` whatever the periods are, and an untyped
+    empty column is `object` already. The test exists because that agreement
+    is currently a coincidence of two independent decisions: it is asserted
+    here so a change to either side is caught rather than shipped.
+
+    The periods are integers on purpose. Text periods would put the column
+    back in the family this cannot fix at all, since pandas 3 reads a
+    populated text column as `str` and an empty object one as `object`.
+    """
+    empty, populated = _grain_pair(
+        sw.PerPeriod("person", periods=[2020, 2021]), {"score": sw.Integer(0, 100)}
+    )
+
+    assert empty["period"].dtype == populated["period"].dtype, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
+def test_a_sequential_column_is_the_dtype_a_zero_row_run_provably_cannot_keep():
+    """The one column named in #137 that is left flipping, on purpose.
+
+    `Sequential` computes its values by applying an arbitrary Python callable
+    to another column, so its type is whatever that callable returns for the
+    values it is actually given. There is no declaration to read and nothing
+    to apply the callable to at zero rows, so the empty case has no honest
+    answer: `float64` here comes from `lambda v: v * 2` over floats, and the
+    same rule over an integer column or a callable returning strings would
+    give something else entirely.
+
+    Asserting the flip rather than skipping it means the limit is tested
+    behaviour. If `Sequential` ever gains a way to declare its type, this test
+    goes red and has to be rewritten as an equality, which is exactly the
+    prompt that should happen.
+
+    Scope: this covers `Sequential` only. `wage`, carried from a rule that
+    does declare a type, is asserted equal in the same breath so the test
+    cannot pass by the empty path having broken for everything.
+    """
+    empty, populated = _grain_pair(
+        sw.PerEntity("person"),
+        {"dbl": sw.Sequential(on="wage", fn=lambda v: v * 2)},
+        carry=["wage"],
+    )
+
+    assert empty["wage"].dtype == populated["wage"].dtype
+    assert empty["dbl"].dtype == object and populated["dbl"].dtype != object, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
 # --- edge cases that turned out to be sound ---------------------------------
 
 

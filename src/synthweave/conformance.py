@@ -22,6 +22,19 @@ generator makes about the chunks it emits. It needs a whole `Schema` rather
 than a bare object, because a generator's output is a function of the config
 and nothing else; that is a real ergonomic difference from `check_rule`, and
 the reason it takes `schema` positionally.
+
+Every conformance failure raised here names its clause first, as
+`"<clause>: <detail>"`, via `_fail_synthesizer` or `_fail_generator`. The
+prefix is load-bearing rather than cosmetic: a conformance check can go red
+for a reason other than the one a test meant to provoke, and the prefix is
+what lets that test assert it went red for the guarantee it named instead of
+an incidental one. A third checker added here follows the same shape.
+
+A `ValueError` from either checker means something different from a
+conformance error: the candidate is not accused of anything, the harness was
+configured so that part of the contract could not be tested. Refusing to
+certify is the only honest answer there, so neither checker returns `None`
+after skipping a clause.
 """
 
 from __future__ import annotations
@@ -56,27 +69,57 @@ def check_synthesizer(
     Runs `synthesizer.run` over chunks a real generator emitted for one of
     `schema`'s tables, and checks, in order:
 
-    1. Rows survive. A synthesizer changes values; it never adds, drops or
+    1. `rows survive`. A synthesizer changes values; it never adds, drops or
        reorders rows. Checked on the reserved row key, so it sees a reorder
-       that a row count alone would miss.
-    2. Columns survive. Stage 2 fills columns the schema declared; it neither
-       invents one nor drops one.
-    3. Undeclared columns are untouched. Every column outside `columns` comes
+       that a row count alone would miss, and names the key if it is dropped.
+    2. `columns survive`. Stage 2 fills columns the schema declared; it
+       neither invents one nor drops one.
+    3. `undeclared columns untouched`. Every column outside `columns` comes
        back exactly as the generator emitted it.
-    4. Determinism. Running it twice over identical input gives identical
+    4. `determinism`. Running it twice over identical input gives identical
        output, so no hidden RNG state is involved.
-    5. Chunk invariance. Running it at `split_chunk_size` gives the same
+    5. `chunk invariance`. Running it at `split_chunk_size` gives the same
        output as at `chunk_size`. This is the guarantee that chunk size is a
        memory knob and nothing else, and the one a fit that buffers whole
        chunks breaks.
 
-    Checks 4 and 5 are only as strong as the configuration they run under: a
-    synthesizer whose fit cap sits above the whole fixture never exercises
-    its buffering, so check it configured the way it will really be used.
+    Raises `SynthesizerConformanceError` prefixed with the clause that broke
+    and showing the first differences, or returns `None` if the synthesizer
+    passes all five.
 
-    Raises `SynthesizerConformanceError` naming the guarantee that broke and
-    showing the first differences, or returns `None` if the synthesizer
-    passes.
+    What a pass does NOT mean. It is a statement about those five properties
+    and nothing else. It is not a correctness certificate, and it is
+    emphatically not a privacy or disclosure one. Each of the following
+    passes today:
+
+    - A synthesizer that declares a column and never writes to it. Nothing
+      here requires a declared column to be filled, so "declared `wage` and
+      left it as the generator drew it" conforms.
+    - A synthesizer that copies source values through verbatim. That is the
+      disclosure a synthesizer exists to prevent, and it is certified: the
+      clauses ask whether the values are stable, never whether they are new.
+    - A synthesizer keyed on a row's position in the stream rather than on
+      the reserved row key. `check_rule` rejects that by name ("position or
+      order"); there is no equivalent clause here, and its absence is a known
+      gap rather than a decision that it is safe. It survives clauses 4 and 5
+      because the built-in generator's row order is position stable, so a
+      position-keyed synthesizer gives the same answer twice and at both
+      chunk sizes.
+    - A synthesizer that reorders columns. Clause 2 compares set membership,
+      and column order is what a CSV export writes.
+    - A synthesizer that mutates the caller's chunk in place instead of
+      copying it.
+    - Anything about a generator other than the one named by `generator=`,
+      which defaults to `"rules"`. The candidate is exercised against that
+      generator's chunks whatever the caller's real pipeline uses.
+
+    Clauses 4 and 5 are also only as strong as the configuration they run
+    under: a synthesizer whose fit cap sits above the whole fixture never
+    exercises its buffering, so check it configured the way it will really be
+    used. Clause 5 needs a chunk boundary to mean anything at all, so a
+    `split_chunk_size` that leaves the table in one chunk is refused with
+    `ValueError` rather than passed. Within that, it tries the one boundary
+    that size produces and no others.
 
     `table` names which of `schema`'s tables to run against, and may be
     omitted only when the schema has exactly one. `columns` names the columns
@@ -87,14 +130,15 @@ def check_synthesizer(
 
     source = resolve("generator", generator)
     baseline_input = _emit(source, target, schema, chunk_size)
-    baseline = _apply(synthesizer, source, target, schema, chunk_size)
+    baseline, _ = _apply(synthesizer, source, target, schema, chunk_size)
 
     _check_rows_survive(baseline_input, baseline)
     _check_columns_survive(baseline_input, baseline)
     _check_undeclared_columns_untouched(baseline_input, baseline, declared)
 
-    repeat = _apply(synthesizer, source, target, schema, chunk_size)
+    repeat, _ = _apply(synthesizer, source, target, schema, chunk_size)
     _check_same_frame(
+        "determinism",
         baseline,
         repeat,
         "running the synthesizer twice over identical input gave different values back "
@@ -102,8 +146,9 @@ def check_synthesizer(
         "from the row key)",
     )
 
-    split = _apply(synthesizer, source, target, schema, split_chunk_size)
+    split, split_chunks = _apply(synthesizer, source, target, schema, split_chunk_size)
     _check_same_frame(
+        "chunk invariance",
         baseline,
         split,
         f"running the synthesizer at chunk_size={split_chunk_size} instead of "
@@ -112,27 +157,55 @@ def check_synthesizer(
         "chunk_size is a memory knob and nothing else",
     )
 
+    _require_a_chunk_boundary(
+        split_chunks, split_chunk_size, "clause 5 (chunk invariance)"
+    )
+
 
 # --- individual checks ------------------------------------------------------
 
 
+def _fail_synthesizer(clause: str, detail: str) -> None:
+    """Raise naming the clause first, the way `_fail_generator` does.
+
+    Kept beside the checks it serves rather than at the bottom of the module,
+    because it is the first thing a new clause has to reach for.
+    """
+    raise SynthesizerConformanceError(f"{clause}: {detail}")
+
+
 def _check_rows_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
     if len(given) != len(got):
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "rows survive",
             f"the synthesizer changed how many rows there are: it was given {len(given)} "
             f"row(s) and returned {len(got)}. A synthesizer changes values in the rows it "
-            "is handed; adding or dropping rows is the generator's job, not stage 2's."
+            "is handed; adding or dropping rows is the generator's job, not stage 2's.",
+        )
+    if ROW_KEY not in got.columns:
+        # Guarded rather than left to `got[ROW_KEY]`, which raises a bare
+        # KeyError naming the column and nothing else. Dropping this column is
+        # an easy mistake (it reads as internal bookkeeping), and a function
+        # whose whole job is to name the broken guarantee should not be the one
+        # that fails to.
+        _fail_synthesizer(
+            "rows survive",
+            f"the synthesizer dropped {ROW_KEY!r}, the reserved row key. It is not "
+            "internal bookkeeping to strip: every downstream stage keys on it, and "
+            "the pipeline cannot line the synthesized values back up without it. "
+            "Pass it through untouched.",
         )
     before = given[ROW_KEY].tolist()
     after = got[ROW_KEY].tolist()
     if before != after:
         differing = [i for i, (b, a) in enumerate(zip(before, after)) if b != a]
         first = differing[0]
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "rows survive",
             f"the synthesizer reordered the rows it was given: {len(differing)} row(s) came "
             f"back under a different {ROW_KEY!r}, first at position {first} "
             f"(was {before[first]!r}, got {after[first]!r}). Row order is the generator's, "
-            "and downstream stages key on it."
+            "and downstream stages key on it.",
         )
 
 
@@ -149,10 +222,11 @@ def _check_columns_survive(given: pd.DataFrame, got: pd.DataFrame) -> None:
             )
             if part
         )
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            "columns survive",
             f"the synthesizer changed which columns the table has: {detail}. Stage 2 fills "
             "columns the schema declared, so a column it adds reaches the user as one the "
-            "schema never promised, and one it drops is a column the schema did promise."
+            "schema never promised, and one it drops is a column the schema did promise.",
         )
 
 
@@ -170,27 +244,32 @@ def _check_undeclared_columns_untouched(
             continue
         rows = _differing_rows(given[column], got[column])
         if len(rows):
-            raise SynthesizerConformanceError(
+            _fail_synthesizer(
+                "undeclared columns untouched",
                 f"the synthesizer wrote to column {column!r}, which it did not declare "
                 f"(it declared {list(declared)}). {len(rows)} row(s) differ, "
-                f"e.g. {_show(given[column], got[column], rows)}."
+                f"e.g. {_show(given[column], got[column], rows)}.",
             )
 
 
-def _check_same_frame(expected: pd.DataFrame, actual: pd.DataFrame, reason: str) -> None:
+def _check_same_frame(
+    clause: str, expected: pd.DataFrame, actual: pd.DataFrame, reason: str
+) -> None:
     """Two runs of the same synthesizer must agree column for column."""
     if list(expected.columns) != list(actual.columns) or len(expected) != len(actual):
-        raise SynthesizerConformanceError(
+        _fail_synthesizer(
+            clause,
             f"{reason}. The two runs do not even have the same shape: "
             f"{expected.shape} with columns {list(expected.columns)} versus "
-            f"{actual.shape} with columns {list(actual.columns)}"
+            f"{actual.shape} with columns {list(actual.columns)}",
         )
     for column in expected.columns:
         rows = _differing_rows(expected[column], actual[column])
         if len(rows):
-            raise SynthesizerConformanceError(
+            _fail_synthesizer(
+                clause,
                 f"{reason}. Column {column!r} differs in {len(rows)} of {len(expected)} "
-                f"row(s), e.g. {_show(expected[column], actual[column], rows)}"
+                f"row(s), e.g. {_show(expected[column], actual[column], rows)}",
             )
 
 
@@ -228,18 +307,45 @@ def _emit(source: Any, table: Table, schema: Schema, chunk_size: int) -> pd.Data
     return _collect(source.emit(table, ctx))
 
 
+class _Counted:
+    """Passes chunks straight through, counting the non-empty ones.
+
+    Counted on the way in rather than by re-emitting, so the number is what
+    the candidate was actually handed. Empty chunks are not counted because
+    they are not boundaries: no row lies on either side of one, so a run that
+    emitted one real chunk and one empty one has nothing more to inspect than
+    a run that emitted one.
+    """
+
+    def __init__(self, chunks: Iterable[pd.DataFrame]) -> None:
+        self._chunks = chunks
+        self.count = 0
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            if len(chunk):
+                self.count += 1
+            yield chunk
+
+
 def _apply(
     synthesizer: Any, source: Any, table: Table, schema: Schema, chunk_size: int
-) -> pd.DataFrame:
-    """The synthesizer's output over freshly generated chunks, as one frame.
+) -> tuple[pd.DataFrame, int]:
+    """The synthesizer's output over freshly generated chunks, plus how many
+    chunks it was handed.
 
     Chunks are re-emitted per call rather than replayed from a list, so the
     synthesizer sees the chunk boundaries the pipeline would really hand it
     at this `chunk_size`, and each call gets its own `RunContext` exactly as
     a separate `Pipeline.run()` would.
+
+    The count comes back because clause 5 is about a chunk boundary, and a
+    `chunk_size` that produced no boundary makes it vacuous. See
+    `_require_a_chunk_boundary`.
     """
     ctx = RunContext(schema=schema, chunk_size=chunk_size)
-    return _collect(synthesizer.run(source.emit(table, ctx), table, ctx))
+    given = _Counted(source.emit(table, ctx))
+    return _collect(synthesizer.run(given, table, ctx)), given.count
 
 
 def _differing_rows(before: pd.Series, after: pd.Series) -> np.ndarray:
@@ -253,6 +359,36 @@ def _show(before: pd.Series, after: pd.Series, rows: np.ndarray, limit: int = 3)
     return ", ".join(
         f"row {int(i)}: expected {before.iloc[int(i)]!r}, got {after.iloc[int(i)]!r}"
         for i in rows[:limit]
+    )
+
+
+def _require_a_chunk_boundary(chunks: int, split_chunk_size: int, clauses: str) -> None:
+    """Refuse to certify clauses that had no chunk boundary to inspect.
+
+    The clauses this guards are about what happens *at* a boundary. When
+    `split_chunk_size` leaves the whole table in one chunk there is no
+    boundary, they pass having examined nothing, and the harness returns
+    `None` exactly as it does for a candidate it genuinely verified. That is a
+    green result that proves nothing, produced by the harness built to prevent
+    exactly that, so it raises instead.
+
+    `ValueError`, not a conformance error: the candidate did nothing wrong.
+    The harness was configured so that part of it could not be tested, and
+    that is the caller's to fix.
+
+    Called after every clause has run, so a candidate that really is broken is
+    told which guarantee it broke rather than being handed a configuration
+    complaint about a check that had already failed.
+    """
+    if chunks >= 2:
+        return
+    raise ValueError(
+        f"split_chunk_size={split_chunk_size} left the whole table in {chunks} chunk(s), "
+        f"so there was no chunk boundary to inspect and {clauses} passed without testing "
+        "anything. Pass a smaller split_chunk_size (down to 1, which puts one entity per "
+        "chunk), or check against a schema with more entities: chunking is over entities "
+        "so that an entity's rows never straddle a boundary, which means a table covering "
+        "a single entity cannot be split at any size."
     )
 
 
@@ -311,7 +447,10 @@ def check_generator(
     when the schema has exactly one. `split_chunk_size` must be small enough
     to split that table into several chunks: clauses 3 and 4 are about chunk
     boundaries, and a size that leaves the whole table in one chunk cannot
-    show a boundary problem at all.
+    show a boundary problem at all. That is checked rather than left to the
+    caller to get right, and a size that does not split raises `ValueError`.
+    Refusing beats certifying: a pass that skipped two of the five clauses is
+    indistinguishable from one that earned all five.
     """
     target = _target_table(schema, table, kind="generator")
 
@@ -325,6 +464,12 @@ def check_generator(
     _check_entity_non_straddling(split, split_chunk_size)
     _check_chunk_invariance(baseline, split, split_chunk_size)
     _check_row_count(split, target, schema)
+
+    _require_a_chunk_boundary(
+        sum(1 for chunk in split if len(chunk)),
+        split_chunk_size,
+        "clauses 3 (entity non-straddling) and 4 (chunk invariance)",
+    )
 
 
 # --- stage 1's individual checks --------------------------------------------
