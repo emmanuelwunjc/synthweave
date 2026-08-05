@@ -1505,6 +1505,21 @@ MUTATIONS = [
         r'    r"\b[A-Za-z0-9._%+-]+@"',
         ("tests/test_leak_guard.py::test_a_reserved_domain_is_reserved_in_prose_and_in_any_case",),
     ),
+    # #155: the digits-only tag pattern the release ran with until now. It
+    # makes `previous_tag` raise on `v0.3.0rc1`, at the notes step that sits
+    # before `Publish to PyPI`, so a release candidate cannot be published at
+    # all. The named test is the one that builds a real repo with a prerelease
+    # tag on the tip and asks `_default_range()` for a range.
+    (
+        "#155 a prerelease tag yields a range instead of stopping the release",
+        "tools/release_notes.py",
+        '    r"^v(?P<version>\\d+(?:\\.\\d+)*)(?:(?P<phase>a|b|rc)(?P<serial>\\d+))?$"',
+        '    r"^v(?P<version>\\d+(?:\\.\\d+)*)$"',
+        (
+            "tests/test_release_notes.py::"
+            "test_a_prerelease_tag_on_the_release_commit_still_yields_a_range",
+        ),
+    ),
 ]
 
 
