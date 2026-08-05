@@ -967,6 +967,29 @@ MUTATIONS = [
         '    current = _git("describe", "--tags", "--exact-match", "--match", "v[0-9]*").strip()',
         '    current = _git("describe", "--tags", "--exact-match").strip()',
     ),
+    # #150: both checkers refuse to certify a clause that had no chunk
+    # boundary to inspect. Mutated at the call sites rather than inside
+    # `_require_a_chunk_boundary`, because one mutation of the shared helper
+    # would disable both refusals at once and could then be caught by either
+    # test. Feeding a hardcoded 2 leaves the helper intact and switches off
+    # exactly one checker's refusal, so each entry is pinned by the test for
+    # that checker and nothing else.
+    (
+        "#150 check_generator refuses a split_chunk_size that produced no boundary",
+        "src/synthweave/conformance.py",
+        "        sum(1 for chunk in split if len(chunk)),",
+        "        2,",
+    ),
+    (
+        "#150 check_synthesizer refuses a split_chunk_size that produced no boundary",
+        "src/synthweave/conformance.py",
+        "    _require_a_chunk_boundary(\n"
+        '        split_chunks, split_chunk_size, "clause 5 (chunk invariance)"\n'
+        "    )",
+        "    _require_a_chunk_boundary(\n"
+        '        2, split_chunk_size, "clause 5 (chunk invariance)"\n'
+        "    )",
+    ),
     # The exact line #125 reported: `write_empty` rebuilding its own stand-in
     # frame instead of writing the typed one the pipeline handed it. Invisible
     # on CSV, baked into the file on Parquet, where every column comes back as
