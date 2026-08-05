@@ -44,6 +44,38 @@ _SCANNED_SUFFIXES = {
 
 _SUPPRESSION = re.compile(r"leak-guard:\s*allow")
 
+# RFC 2606 reserves example.com, example.net, example.org and the top-level
+# domains .test, .example, .invalid and .localhost for documentation and
+# testing, precisely so they can never resolve to anything real; RFC 6761
+# repeats that guarantee for .localhost and .invalid. An address at one of
+# them names nobody and cannot be a mailbox, so it is provably not a leak.
+#
+# This is not the blanket tests/ suppression #154 removed. That one traded
+# real coverage for quiet across three directories. This is a statement about
+# addresses that cannot exist, and it costs no coverage at all: a resolvable
+# domain is still caught everywhere, including under tests/ (issue #167).
+_RESERVED_DOMAIN = (
+    r"(?:[A-Za-z0-9-]+\.)*"
+    r"(?:test|example|invalid|localhost|example\.(?:com|net|org))"
+)
+
+# The reserved tail has to end the domain, or `e@example.com.co` -- somebody's  # leak-guard: allow (an invented address, named here because it is the case this bound exists to keep catching)
+# real domain -- would pass as a reserved one wearing a suffix. What ends a
+# domain is the fiddly half: a following label continues it, but a full stop
+# at the end of an English sentence does not. So the tail may not be followed
+# by a domain character, nor by a dot that a label actually follows. Without
+# that second half `Write to user@example.com.` is a finding, and the
+# annotation tax this exemption removes from tests reappears in prose, which
+# is where example addresses mostly live.
+#
+# `(?i)` because domain names are case-insensitive and the RFCs spell them
+# capitalised. `Example.COM` is the same unregistrable domain.
+_EMAIL = (
+    r"(?i)\b[A-Za-z0-9._%+-]+@"
+    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"
+    r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+)
+
 # Shapes that mean real people.
 #
 # These used to be suppressed wholesale under src/, tests/ and examples/, on
@@ -59,7 +91,7 @@ _SUPPRESSION = re.compile(r"leak-guard:\s*allow")
 # genuine literal, and makes writing one down a deliberate act.
 _PERSONAL_PATTERNS = (
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
-    ("email address", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("email address", re.compile(_EMAIL)),
     ("phone number", re.compile(r"\b\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")),
 )
 

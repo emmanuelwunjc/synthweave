@@ -209,7 +209,7 @@ def test_the_range_ignores_a_non_release_tag_on_the_release_commit(tmp_path, mon
     """
     _run(tmp_path, "init", "-q", "-b", "main")
     # `.test` is an RFC 2606 reserved TLD, so this cannot be a real mailbox.
-    _run(tmp_path, "config", "user.email", "t@example.test")  # leak-guard: allow
+    _run(tmp_path, "config", "user.email", "t@example.test")
     _run(tmp_path, "config", "user.name", "t")
     (tmp_path / "a.txt").write_text("one\n")
     _run(tmp_path, "add", "a.txt")
@@ -225,3 +225,101 @@ def test_the_range_ignores_a_non_release_tag_on_the_release_commit(tmp_path, mon
     monkeypatch.chdir(tmp_path)
 
     assert release_notes._default_range() == "v0.1.0..v0.2.0"
+
+
+def _init_repo(tmp_path):
+    """A real one-commit-per-call git repo, for the tests that exercise the
+    git layer rather than the string layer."""
+    _run(tmp_path, "init", "-q", "-b", "main")
+    # `.test` is an RFC 2606 reserved TLD, so this cannot be a real mailbox.
+    _run(tmp_path, "config", "user.email", "t@example.test")  # leak-guard: allow
+    _run(tmp_path, "config", "user.name", "t")
+
+
+def _commit(tmp_path, subject, text):
+    (tmp_path / "a.txt").write_text(text)
+    _run(tmp_path, "add", "a.txt")
+    _run(tmp_path, "commit", "-qm", subject)
+
+
+def test_a_prerelease_tag_on_the_release_commit_still_yields_a_range(
+    tmp_path, monkeypatch
+):
+    """`release.yml` triggers on `tags: ["v*"]`, so `v0.3.0rc1` starts a real
+    release run. A tag shape the notes generator refuses stops that run at the
+    step before `Publish to PyPI`, which makes publishing a release candidate
+    impossible until someone deletes the tag."""
+    _init_repo(tmp_path)
+    _commit(tmp_path, "feat: the first thing", "one\n")
+    _run(tmp_path, "tag", "v0.2.0")
+    _commit(tmp_path, "fix: the second thing", "two\n")
+    _run(tmp_path, "tag", "v0.3.0rc1")
+
+    monkeypatch.chdir(tmp_path)
+
+    assert release_notes._default_range() == "v0.2.0..v0.3.0rc1"
+
+
+def test_a_prerelease_orders_below_the_final_release_of_the_same_version():
+    """v0.3.0rc1 precedes v0.3.0, so the notes for the final release cover
+    only what landed after the candidate, not the whole range again."""
+    tags = ["v0.2.0", "v0.3.0a1", "v0.3.0b2", "v0.3.0rc1", "v0.3.0"]
+    assert release_notes.previous_tag(tags, "v0.3.0") == "v0.3.0rc1"
+    assert release_notes.previous_tag(tags, "v0.3.0rc1") == "v0.3.0b2"
+    assert release_notes.previous_tag(tags, "v0.3.0b2") == "v0.3.0a1"
+    assert release_notes.previous_tag(tags, "v0.3.0a1") == "v0.2.0"
+
+
+def test_the_previous_tag_is_a_tag_that_exists_rather_than_a_rebuilt_name():
+    """A name rebuilt from parsed components loses the spelling: `v0.02.0`
+    comes back as `v0.2.0`, which no ref matches, so `git log` then fails
+    about an unknown revision instead of about the tag."""
+    assert release_notes.previous_tag(["v0.02.0"], "v0.3.0") == "v0.02.0"
+
+
+def test_main_writes_the_rendered_body_for_an_explicit_range(
+    tmp_path, monkeypatch, capsys
+):
+    """The whole reason the tool exists is what lands on stdout during
+    `Generate the release notes`. Nothing asserted that end to end."""
+    _init_repo(tmp_path)
+    _commit(tmp_path, "chore: set the base", "base\n")
+    _run(tmp_path, "tag", "v0.1.0")
+    _commit(tmp_path, "feat: ship the thing (#1)", "one\n")
+    _commit(tmp_path, "fix(io): stop dropping a column (#2)", "two\n")
+
+    monkeypatch.chdir(tmp_path)
+
+    assert release_notes.main(["v0.1.0..HEAD"]) == 0
+    assert capsys.readouterr().out == (
+        "### Features\n"
+        "\n"
+        "- ship the thing (#1)\n"
+        "\n"
+        "### Fixes\n"
+        "\n"
+        "- **io:** stop dropping a column (#2)\n"
+    )
+
+
+def test_a_merge_commits_own_work_still_reaches_the_notes(
+    tmp_path, monkeypatch, capsys
+):
+    """`--no-merges` drops the merge commit itself, and only that. The branch
+    commits it joins are still in the range, so the work reaches the notes and
+    only the bookkeeping subject is absent. This is what keeps #114's "never
+    dropped" claim about untyped subjects true."""
+    _init_repo(tmp_path)
+    _commit(tmp_path, "chore: set the base", "base\n")
+    _run(tmp_path, "tag", "v0.1.0")
+    _run(tmp_path, "checkout", "-q", "-b", "side")
+    _commit(tmp_path, "an untyped thing done on a branch", "side\n")
+    _run(tmp_path, "checkout", "-q", "main")
+    _run(tmp_path, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
+
+    monkeypatch.chdir(tmp_path)
+
+    release_notes.main(["v0.1.0..HEAD"])
+    body = capsys.readouterr().out
+    assert "an untyped thing done on a branch" in body
+    assert "Merge branch" not in body

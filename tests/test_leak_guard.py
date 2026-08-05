@@ -105,7 +105,7 @@ def test_private_paths_come_from_gitignore_not_a_hardcoded_list():
     "line",
     [
         "subject ssn is 123-45-6789 per the intake form",  # leak-guard: allow (this guard's own SSN fixture)
-        "contact: jane.doe@example.org",  # leak-guard: allow (example.org is the reserved documentation domain)
+        "contact: jane.doe@realmail.co",  # leak-guard: allow (an invented address; a reserved domain would not be caught, per #167)
         "call 415-555-0142 to confirm",  # leak-guard: allow (555-01xx is the reserved fictional range)
         "CENSUS_API_KEY=0123456789abcdef0123456789abcdef01234567",  # leak-guard: allow (fixture)
         "loaded from /Users/yw1084/code/synthweave/private.csv",  # leak-guard: allow (fixture)
@@ -163,7 +163,7 @@ def test_a_real_person_in_the_package_is_caught(path):
     a literal one written into a file is a person, and is now caught.
     """
     body = (
-        'CONTACT = "marcus.delacroix@realmail.example"\n'  # leak-guard: allow (the invented person this test exists to catch)
+        'CONTACT = "marcus.delacroix@realmail.co"\n'  # leak-guard: allow (the invented person this test exists to catch; .example is reserved and would not be caught, per #167)
         'SSN = "078-05-1120"\n'  # leak-guard: allow (078-05-1120 is the void Woolworth wallet SSN, issued to nobody)
         'PHONE = "415-555-0142"\n'  # leak-guard: allow (555-01xx is the reserved fictional range)
     )
@@ -211,6 +211,85 @@ def test_placeholder_credentials_in_fixtures_are_not_flagged(path, line):
     characters, `ancestor-key` is 12 with no digit, `root-key` is 8, and the
     docstring's value stops at the first space. All stay under both bars."""
     assert guard.pii_findings(path, line) == []
+
+
+# --- addresses that cannot exist (issue #167) ----------------------------
+
+_ANY_DIRECTORY = ["docs/GUIDE.md", "tests/test_release_notes.py",
+                  "src/synthweave/io.py", "examples/three_modes.py"]
+
+
+@pytest.mark.parametrize("path", _ANY_DIRECTORY)
+@pytest.mark.parametrize(
+    "line",
+    [
+        'CONTACT = "user@example.com"',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        '_run(tmp_path, "config", "user.email", "t@example.test")',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        'CONTACT = "a@foo.invalid"',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        'CONTACT = "b@bar.localhost"',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        'CONTACT = "c@x.example"',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        'CONTACT = "d@mail.example.org"',  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+    ],
+)
+def test_reserved_example_domains_are_not_addresses(path, line):
+    """RFC 2606 reserves example.com/.net/.org and the TLDs .test, .example,
+    .invalid and .localhost so they can never resolve; RFC 6761 repeats the
+    guarantee for .localhost and .invalid. An address there names nobody, so
+    exempting it is a statement about addresses that cannot exist rather than
+    a heuristic trading coverage for quiet (issue #167). git needs an identity
+    to commit in a throwaway repo, and `t@example.test` is the honest one.
+    """
+    assert guard.pii_findings(path, line) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A full stop is prose punctuation, not a domain label. Docs are where
+        # example addresses appear most, so flagging this would move the
+        # annotation tax out of tests and into prose rather than removing it.
+        "Write to user@example.com.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "Write to user@example.com, then wait.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "Mail <t@example.test> to configure git.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        # Domain names are case-insensitive, and the RFCs capitalize them.
+        "CONTACT = 'User@Example.COM'",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "CONTACT = 'T@EXAMPLE.TEST'",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+    ],
+)
+def test_a_reserved_domain_is_reserved_in_prose_and_in_any_case(line):
+    """The two ways the exemption stops short of its own point. Neither a
+    sentence-ending period nor an uppercase spelling makes a domain real."""
+    assert guard.pii_findings("docs/GUIDE.md", line) == []
+
+
+@pytest.mark.parametrize("path", _ANY_DIRECTORY)
+@pytest.mark.parametrize(
+    "line",
+    [
+        'CONTACT = "someone@gmail.com"',  # leak-guard: allow (the real-looking address this test exists to catch)
+        'CONTACT = "first.last@company.co.uk"',  # leak-guard: allow (the real-looking address this test exists to catch)
+        # A reserved label that does not end the domain is somebody's real
+        # subdomain, not a reserved one wearing a suffix.
+        'CONTACT = "e@example.com.co"',  # leak-guard: allow (the real-looking address this test exists to catch)
+        'CONTACT = "f@testing.co"',  # leak-guard: allow (the real-looking address this test exists to catch)
+    ],
+)
+def test_a_resolvable_address_is_still_caught_in_any_directory(path, line):
+    """The exemption is a whitelist of domains that provably cannot exist. It
+    must not become the blanket tests/ suppression #154 removed."""
+    assert [label for _, label, _ in guard.pii_findings(path, line)] == ["email address"]
+
+
+@pytest.mark.parametrize(
+    ("line", "label"),
+    [
+        ('a@example.com API_KEY=abc123def456ghi7', "credential"),  # leak-guard: allow (fixture)
+        ('a@example.com loaded from /Users/yw1084/notes/', "personal absolute path"),  # leak-guard: allow (fixture)
+    ],
+)
+def test_the_reserved_domain_exemption_covers_the_address_only(line, label):
+    """A reserved address on a line does not buy the rest of it a pass."""
+    assert [found for _, found, _ in guard.pii_findings("tests/test_x.py", line)] == [label]
 
 
 def test_a_suppression_comment_silences_one_line():

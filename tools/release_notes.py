@@ -16,6 +16,13 @@ that actually exists, so the grouping is generated from those.
 
 The parsing rules and the section order are exercised by
 tests/test_release_notes.py against real subjects from this repo's history.
+
+`git log --no-merges` is deliberate, and it is the one place a subject really
+is dropped. A merge commit's own subject ("Merge branch 'side'") is
+bookkeeping: it names a branch, not a change, and it would land under "Other"
+next to the untyped subjects that "never dropped" is about. Nothing else goes
+with it, because the commits the merge joins are themselves inside the range
+and still reach the notes. So the work is never lost, only the join is.
 """
 
 import dataclasses
@@ -57,7 +64,18 @@ _SUBJECT = re.compile(
 # PR: `feat(mode): ... (#87) (#92)` cites issue #87 and was merged as #92.
 _TRAILING_PR = re.compile(r"\s*\(#(?P<pr>\d+)\)$")
 
-_VERSION_TAG = re.compile(r"^v(?P<version>\d+(?:\.\d+)*)$")
+# A release tag, with an optional PEP 440 prerelease suffix. `release.yml`
+# triggers on `tags: ["v*"]`, so `v0.3.0rc1` starts a real release run; a tag
+# shape refused here stops that run at the step before `Publish to PyPI`, and
+# publishing a release candidate becomes impossible until the tag is deleted.
+_VERSION_TAG = re.compile(
+    r"^v(?P<version>\d+(?:\.\d+)*)(?:(?P<phase>a|b|rc)(?P<serial>\d+))?$"
+)
+
+# a1 < b2 < rc1 < the final release, per PEP 440. A final release has no
+# suffix, so it takes the rank above every prerelease of the same version.
+_PHASES = {"a": 0, "b": 1, "rc": 2}
+_FINAL = len(_PHASES)
 
 _TYPES = {key for key, _ in SECTIONS}
 
@@ -144,25 +162,40 @@ def render(subjects) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def _version(tag: str):
+    """A sort key for a release tag, or None if it is not one."""
+    match = _VERSION_TAG.match(tag)
+    if not match:
+        return None
+    release = tuple(int(part) for part in match.group("version").split("."))
+    phase = match.group("phase")
+    if phase is None:
+        return (release, _FINAL, 0)
+    return (release, _PHASES[phase], int(match.group("serial")))
+
+
 def previous_tag(tags, current: str) -> str | None:
     """The highest release tag below `current`, or None if it is the first.
 
     Only `v`-prefixed version tags count: this repo also carries
     `archive/bug-hunt` and `wip/pre-worktree-split`, which are not releases.
     Ordering is numeric per component, so v0.10.0 sorts above v0.9.0 the way
-    a string sort would not.
-    """
-    def version(tag):
-        match = _VERSION_TAG.match(tag)
-        return tuple(int(p) for p in match.group("version").split(".")) if match else None
+    a string sort would not, and a prerelease sorts below the final release of
+    the same version, so v0.3.0's notes cover only what landed after v0.3.0rc1.
 
-    here = version(current)
+    The tag returned is one taken from `tags`, never a name rebuilt from the
+    parsed components: a tag spelled `v0.02.0` rebuilds as `v0.2.0`, which no
+    ref matches, and `git log` then fails about an unknown revision rather
+    than about the tag spelling.
+    """
+    here = _version(current)
     if here is None:
         raise ValueError(f"{current!r} is not a vN.N.N release tag")
-    earlier = [v for v in map(version, tags) if v is not None and v < here]
+    versioned = ((_version(tag), tag) for tag in tags)
+    earlier = [(v, tag) for v, tag in versioned if v is not None and v < here]
     if not earlier:
         return None
-    return "v" + ".".join(str(p) for p in max(earlier))
+    return max(earlier, key=lambda pair: pair[0])[1]
 
 
 def _git(*args) -> str:
