@@ -4,17 +4,27 @@ A fix with no test that catches its absence is not locked down. Each revert is
 applied to a throwaway copy of the checkout, the suite runs against that copy,
 and the harness reports whether the suite noticed.
 
-Three properties are load-bearing and none is traded for speed:
+Four properties are load-bearing and none is traded for speed:
 
 - MISSED: a reverted fix that no test catches fails the run.
 - STALE: an entry whose file or snippet no longer matches verified nothing, so
   it fails the run too.
 - INCONCLUSIVE: a suite run that never finished verified nothing either, so it
   is neither a pass nor a catch, and it fails the run as well.
+- INCIDENTAL: a red suite is not automatically a catch. An entry may name the
+  test(s) that own the property it claims to pin, and a named entry is CAUGHT
+  only if one of them is red. A red anywhere else fails the run instead.
 
-The last one is the direction this harness must never fail in. "I could not
+INCONCLUSIVE is the direction this harness must never fail in. "I could not
 tell" resolving to "covered" is worse than a crash, because a crash gets
-noticed.
+noticed. INCIDENTAL is the same hazard one level in: a red for the wrong
+reason resolving to "covered" reads exactly like coverage and is not.
+
+    python3 tools/mutation_check.py --audit        # which tests each revert breaks
+
+`--audit` runs every entry without `-x` and prints the whole failure set, which
+is how an entry worth pinning gets found rather than guessed. It is a
+diagnostic and always exits 0; the gate is the pin.
 
 Every mutation is independent, so they run concurrently, one sandbox per
 worker. Sandboxing is what makes that safe: the real working tree is never
@@ -93,18 +103,39 @@ SUITE_TIMEOUT = 300
 # proof that a revert was caught.
 PASSED, FAILED, DID_NOT_FINISH = "passed", "failed", "did not finish"
 
+# Two more ways a pytest invocation ends without saying anything about the
+# code. Both used to be folded into `returncode != 0`, i.e. into FAILED, i.e.
+# into CAUGHT: a nodeid that no longer resolves and an internal pytest error
+# each read as "a test noticed the revert".
+NOT_COLLECTED = "collected no such test"
+BROKE = "ended without a verdict"
+
+# pytest's documented exit codes. 0 and 1 are the only two that mean a suite
+# ran and reached a verdict.
+_EXIT_OUTCOME = {0: PASSED, 1: FAILED, 4: NOT_COLLECTED, 5: NOT_COLLECTED}
+
 # Verdicts. CAUGHT is the only one that counts as coverage; the rest fail the
 # run, each for its own reason.
 CAUGHT, MISSED, STALE, INCONCLUSIVE = "CAUGHT", "MISSED", "STALE", "INCONCLUSIVE"
+# A red suite that no test naming the property accounted for. Not MISSED (the
+# suite genuinely went red) and not CAUGHT (the red was about something else).
+INCIDENTAL = "INCIDENTAL"
 
 # Printed above the names when a verdict fails the run.
 FAILURE_HEADLINE = {
     STALE: "mutation(s) no longer match the code and verified nothing:",
     MISSED: "fix(es) with NO regression coverage:",
+    INCIDENTAL: "mutation(s) caught only by a red that says nothing about the property named:",
     INCONCLUSIVE: "mutation(s) whose suite run never finished, so nothing was verified:",
 }
 
-# (issue, file, original_snippet, reverted_snippet)
+# (issue, file, original_snippet, reverted_snippet[, catchers])
+#
+# `catchers` is optional and is the #158 mechanism: a tuple of pytest node ids
+# naming the test(s) that own the property the entry claims to pin. When it is
+# present the entry is CAUGHT only if at least one of them is red under the
+# revert, so a suite that went red somewhere else entirely no longer counts.
+# See `check()` for why a missing node id is STALE rather than a catch.
 MUTATIONS = [
     (
         "I1 synthesizer table scoping",
@@ -686,10 +717,16 @@ MUTATIONS = [
     # "delete the guard" mutations: each one is the shape a real arithmetic
     # slip would take, which is what the existing entries did not cover.
     (
+        # Pinned (#156). This entry used to report CAUGHT on the strength of a
+        # dtype-narrowing ValueError in a chunk-shift test: the mutation moves
+        # every derived value in the library, so *something* somewhere was
+        # always going to notice, and nothing asserted the separation itself.
+        # One fixture edit away from MISSED, silently.
         "#65 hash_key keeps seed and salt separated",
         "src/synthweave/_hash.py",
         'return hashlib.sha256(f"{seed}\\x00{salt}".encode()).hexdigest()[:16]',
         'return hashlib.sha256(f"{seed}{salt}".encode()).hexdigest()[:16]',
+        ("tests/test_hash_invariants.py::test_seed_and_salt_stay_separated_in_the_hash_key",),
     ),
     (
         "#65 the salt reaches the hash key (independent draws per salt)",
@@ -716,10 +753,14 @@ MUTATIONS = [
         "    z = np.sqrt(-1.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)",
     ),
     (
+        # Pinned (#156). The sole catcher was a KeyError for an unmapped
+        # Census category, which is a test about a missing mapping and says
+        # nothing about whether a pick reaches every value it was given.
         "#65 unweighted pick() spreads over every value",
         "src/synthweave/_hash.py",
         "        idx = np.minimum((u * len(values)).astype(np.int64), len(values) - 1)",
         "        idx = np.minimum((u * (len(values) - 1)).astype(np.int64), len(values) - 1)",
+        ("tests/test_hash_invariants.py::test_an_unweighted_choice_reaches_every_value_it_was_given",),
     ),
     (
         "#65 weighted pick() normalizes the weights before the cumsum",
@@ -823,6 +864,14 @@ MUTATIONS = [
             else:
                 yield chunk
 """,
+        # Pinned (#158). The trap described above is exactly what the pin
+        # mechanism is for, so this entry names the test that asserts the
+        # guarantee rather than trusting the suite to be red for the right
+        # reason. Confirmed: with the guard in place every remaining failure
+        # reads `entity non-straddling: ...`.
+        (
+            "tests/test_generator_conformance.py::test_every_registered_generator_conforms",
+        ),
     ),
     (
         "#61 find_stack_level walks out of the package instead of guessing",
@@ -861,6 +910,22 @@ MUTATIONS = [
             return restored
 """,
         "",
+    ),
+    (
+        # #134. The entry above deletes the whole ExtensionDtype block, so the
+        # null guard *inside* it never gets reverted on its own and nothing
+        # says whether it is load-bearing. It is: `pd.array` maps a value the
+        # dtype cannot hold to null where `astype` would have raised, so
+        # without this clause a `Typo` result outside a category's set
+        # disappears into a null and the column reads as clean -- the exact
+        # papering over `_restore_dtype` exists to refuse.
+        "#134 a cast that nulls a live value is a failed restore, not a clean column",
+        "src/synthweave/stages/noise.py",
+        """            if (pd.isna(restored) & ~pd.isna(values)).any():
+                return values
+""",
+        "",
+        ("tests/test_noise.py::test_typo_on_a_category_column_falls_back_to_object",),
     ),
     (
         "#82 an empty table keeps the dtypes its rules declare",
@@ -1023,10 +1088,21 @@ MUTATIONS = [
 ]
 
 
+def catchers(entry: tuple) -> tuple[str, ...]:
+    """The test node ids an entry pins itself to, or `()` if it pins none.
+
+    Entries are four-element tuples by default and five-element ones when
+    pinned, so that adding the mechanism did not require touching a hundred
+    existing entries at once.
+    """
+    return tuple(entry[4]) if len(entry) > 4 else ()
+
+
 def run_suite(
     cwd: pathlib.Path,
     targets: tuple[str, ...] = ("tests/",),
     extra: tuple[str, ...] = (),
+    stop_early: bool = True,
 ) -> tuple[str, str, str]:
     """Run the suite in `cwd`. Returns (outcome, summary line, full output)."""
     # Inherit the real environment and override only PYTHONPATH. Replacing it
@@ -1042,7 +1118,8 @@ def run_suite(
     env = {**os.environ, "PYTHONPATH": "src"}
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", *targets, "-q", "--no-header", "-x",
+            [sys.executable, "-m", "pytest", *targets, "-q", "--no-header",
+             *(("-x",) if stop_early else ()),
              "-W", "error::UserWarning", *extra],
             cwd=cwd,
             env=env,
@@ -1056,7 +1133,11 @@ def run_suite(
         return DID_NOT_FINISH, f"suite timed out after {expired.timeout}s", ""
     output = proc.stdout + proc.stderr
     tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
-    outcome = PASSED if proc.returncode == 0 else FAILED
+    # Not `returncode != 0`. pytest exits 4 for a node id that does not
+    # resolve and 2/3 when it broke before running anything, and reading
+    # either as "a test went red" is how a pin that points at nothing would
+    # report as coverage.
+    outcome = _EXIT_OUTCOME.get(proc.returncode, BROKE)
     return outcome, (tail[-1] if tail else "no output"), output
 
 
@@ -1134,9 +1215,65 @@ def report_blind_spot(baseline_output: str) -> int:
     return 0
 
 
-def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
+_FAILED_LINE = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)")
+
+
+def failing_tests(output: str) -> list[str]:
+    """The node ids in a run's short summary, sorted.
+
+    Used by `--audit` to show *which* tests a revert broke, which is the
+    evidence an entry needs before its catchers can be pinned honestly.
+    """
+    found = set()
+    for line in output.splitlines():
+        match = _FAILED_LINE.match(line.strip())
+        if match:
+            found.add(match.group(1).split(" - ")[0])
+    return sorted(found)
+
+
+def confirm_catchers(
+    sandbox: pathlib.Path, named: tuple[str, ...]
+) -> tuple[str, str]:
+    """Re-run only the tests an entry pinned itself to. Returns (verdict, detail).
+
+    The full-suite run already went red by the time this is called; the only
+    question left is whether the red had anything to do with the property the
+    entry names. Three outcomes matter and each maps to a different verdict:
+
+    - a pinned test is red     -> CAUGHT, the red is the one that was claimed
+    - every pinned test passes -> INCIDENTAL, the suite broke somewhere else
+    - a pinned test is missing -> STALE, the pin verified nothing
+
+    The last one is why this cannot be a plain `returncode != 0`. pytest
+    answers a renamed or deleted node id with exit 4, which the old mapping
+    read as a failing test, so a rename would have turned a broken pin into a
+    silent pass. `run_suite` now reports that as NOT_COLLECTED instead.
+    """
+    outcome, msg, _ = run_suite(sandbox, named, ("-p", "no:cacheprovider"))
+    listed = ", ".join(named)
+    if outcome == NOT_COLLECTED:
+        return STALE, f"pinned catcher(s) {listed} no longer resolve to a test ({msg})"
+    if outcome == PASSED and " passed" not in msg:
+        # An all-skipped selection also exits 0. Nothing ran, so this says
+        # nothing either way -- and it is not hypothetical: pinned tests do
+        # self-skip, `test_own_makes_a_view_safe_to_write_to` under pandas 3
+        # among them.
+        return INCONCLUSIVE, f"every pinned catcher was skipped, not run ({msg})"
+    if outcome == PASSED:
+        return INCIDENTAL, (
+            f"the suite went red, but the pinned catcher(s) {listed} all passed, "
+            "so the red says nothing about the property this entry names"
+        )
+    if outcome != FAILED:
+        return INCONCLUSIVE, f"the catcher run {outcome} ({msg})"
+    return CAUGHT, msg
+
+
+def check(entry: tuple, sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, str, str]:
     """Verify one entry. Returns (verdict, name, detail); verdict is the label."""
-    name, relpath, original, reverted = entry
+    name, relpath, original, reverted = entry[:4]
+    named = catchers(entry)
     source = ROOT / relpath
     if not source.exists():
         # A missing file verifies exactly as much as a missing snippet does:
@@ -1154,6 +1291,12 @@ def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path
         path.write_text(text.replace(original, reverted, 1))
         try:
             outcome, msg, _ = run_suite(sandbox)
+            if outcome == FAILED and named:
+                # Second, much smaller run: the pinned tests only. Paid solely
+                # by pinned entries that already went red, so the cost is a
+                # few seconds per entry rather than a second full suite.
+                verdict, msg = confirm_catchers(sandbox, named)
+                return verdict, name, msg
         finally:
             # The sandbox is reused by the next entry, so put the file back
             # even though nothing outside this directory can see it.
@@ -1165,6 +1308,32 @@ def check(entry: tuple[str, str, str, str], sandboxes: "queue.Queue[pathlib.Path
     # `not ok`: only a suite that ran to a red verdict earns CAUGHT.
     verdict = {FAILED: CAUGHT, PASSED: MISSED}.get(outcome, INCONCLUSIVE)
     return verdict, name, msg
+
+
+def audit(entry: tuple, sandboxes: "queue.Queue[pathlib.Path]") -> tuple[str, list[str]]:
+    """Name every test a revert breaks, so an incidental red can be *seen*.
+
+    `check()` stops at the first failure, which is fast but tells you only
+    that something went red. Reviewing whether a red is the right red needs
+    the whole failure set, so this runs without `-x` and parses the short
+    summary. It is a diagnostic, not a gate: it is what you run once over the
+    list to decide which entries need pinning.
+    """
+    name, relpath, original, reverted = entry[:4]
+    source = ROOT / relpath
+    if not source.exists() or original not in (text := source.read_text()):
+        return name, []
+    sandbox = sandboxes.get()
+    try:
+        path = sandbox / relpath
+        path.write_text(text.replace(original, reverted, 1))
+        try:
+            _, _, output = run_suite(sandbox, extra=("-rf",), stop_early=False)
+        finally:
+            path.write_text(text)
+    finally:
+        sandboxes.put(sandbox)
+    return name, failing_tests(output)
 
 
 def shard(entries: list, spec: str | None) -> list:
@@ -1189,10 +1358,14 @@ def shard(entries: list, spec: str | None) -> list:
 
 
 def main(argv: list[str]) -> int:
-    spec = None
+    spec, auditing = None, False
+    argv = list(argv)
+    if "--audit" in argv:
+        auditing = True
+        argv.remove("--audit")
     if argv:
         if len(argv) != 2 or argv[0] != "--shard":
-            raise SystemExit(f"usage: {sys.argv[0]} [--shard i/N]")
+            raise SystemExit(f"usage: {sys.argv[0]} [--shard i/N] [--audit]")
         spec = argv[1]
     entries = shard(MUTATIONS, spec)
     # Printed so the sum across a CI matrix is auditable from the logs alone:
@@ -1210,6 +1383,15 @@ def main(argv: list[str]) -> int:
             box = pathlib.Path(tmp) / f"w{i}"
             shutil.copytree(ROOT, box, ignore=shutil.ignore_patterns(*SANDBOX_SKIP), symlinks=True)
             sandboxes.put(box)
+
+        if auditing:
+            print("audit: every test each revert breaks (diagnostic, not a gate)\n")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                for name, broken in pool.map(lambda e: audit(e, sandboxes), entries):
+                    print(f"  {name}")
+                    for nodeid in broken or ["(nothing broke, or the entry is stale)"]:
+                        print(f"      {nodeid}")
+            return 0
 
         print(f"baseline ({workers} workers): ", end="", flush=True)
         first = sandboxes.get()
