@@ -183,6 +183,8 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
     exists once it has been called, so the same check has to happen here.
     Out of range is silent otherwise: above 1 corrupts every row, below 0
     corrupts none, and both look like a result rather than a config error.
+    A NaN rate is refused by the same check and named as NaN, because it is
+    not a rate and the row it lands on has no defined share to corrupt.
 
     The length is checked for the same reason. `np.asarray` accepts a scalar
     or a length numpy can broadcast, so a rate derived from the chunk as a
@@ -207,12 +209,36 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
             f"chunk as a whole is not a function of the row, and would make the "
             f"result depend on chunk_size."
         )
-    if not np.all((rates >= 0.0) & (rates <= 1.0)):
-        bad = rates[(rates < 0.0) | (rates > 1.0)]
-        raise ValueError(
-            f"noise rate function for {path} returned value(s) outside [0, 1], "
-            f"e.g. {sorted(set(bad.tolist()))[:3]}"
-        )
+    in_range = (rates >= 0.0) & (rates <= 1.0)
+    if not np.all(in_range):
+        # The rows that failed, split by why. NaN compares False against every
+        # one of `>=`, `<=`, `<` and `>`, so a NaN rate used to fail the check
+        # and then be excluded from the examples, leaving the caller told that
+        # a value was outside [0, 1] and shown none of them (#169). NaN in a
+        # rate is ordinary: a division by a zero-valued column produces it, and
+        # so does arithmetic over a column that itself carries missing values.
+        # It stays rejected, because treating it as 0.0 would silently deliver
+        # no noise on exactly the rows the caller asked to corrupt.
+        #
+        # The split is exhaustive: a float that is not NaN and fails `in_range`
+        # is below 0 or above 1, so at least one clause always has rows and the
+        # message can never be example-less.
+        failed = np.flatnonzero(~in_range)
+        is_nan = np.isnan(rates[failed])
+        nan_at, out_at = failed[is_nan], failed[~is_nan]
+        reasons = []
+        if nan_at.size:
+            reasons.append(
+                f"NaN (not a number) for {nan_at.size} row(s), "
+                f"first at row {nan_at[0]} of the chunk"
+            )
+        if out_at.size:
+            examples = sorted(set(rates[out_at].tolist()))[:3]
+            reasons.append(
+                f"value(s) outside [0, 1], e.g. {examples} "
+                f"({out_at.size} row(s), first at row {out_at[0]} of the chunk)"
+            )
+        raise ValueError(f"noise rate function for {path} returned " + "; ".join(reasons))
     _check_row_wise(fn, chunk, rates, path)
     return rates
 

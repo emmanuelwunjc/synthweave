@@ -427,7 +427,7 @@ MUTATIONS = [
     (
         "#10 per-row rate range check",
         "src/synthweave/stages/noise.py",
-        "    if not np.all((rates >= 0.0) & (rates <= 1.0)):",
+        "    if not np.all(in_range):",
         "    if False:",
     ),
     (
@@ -1084,6 +1084,18 @@ MUTATIONS = [
         "src/synthweave/stages/noise.py",
         "    _check_row_wise(fn, chunk, rates, path)\n",
         "",
+    ),
+    # #169: the range check and the example list used to disagree, so a NaN
+    # rate raised and then showed `e.g. []`. The revert drops the NaN rows back
+    # out of the split, which is exactly the old behaviour: the message names
+    # only the out-of-range rows, and a NaN-only rate is refused with nothing
+    # named at all. Pinned (#158) to the test that owns the property.
+    (
+        "#169 a NaN noise rate is named as NaN, not shown as an empty example",
+        "src/synthweave/stages/noise.py",
+        "        nan_at, out_at = failed[is_nan], failed[~is_nan]\n",
+        "        nan_at, out_at = failed[:0], failed[~is_nan]\n",
+        ("tests/test_noise.py::test_a_nan_rate_is_refused_by_name_not_as_an_empty_example",),
     ),
 ]
 
