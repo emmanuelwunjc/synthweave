@@ -1010,6 +1010,16 @@ MUTATIONS = [
         "    return _GrainColumn(np.arange(0).dtype) if isinstance(grain, PerEvent) else None",
         "    return None",
     ),
+    # #101's shape check passes a chunk-derived rate that was broadcast back to
+    # one value per row, so without the behavioural split every row silently
+    # gets the mean of whichever rows shared its chunk and the output depends
+    # on chunk_size.
+    (
+        "#126 a chunk-derived noise rate is refused, not just a misshapen one",
+        "src/synthweave/stages/noise.py",
+        "    _check_row_wise(fn, chunk, rates, path)\n",
+        "",
+    ),
 ]
 
 
