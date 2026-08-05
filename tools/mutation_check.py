@@ -1085,6 +1085,28 @@ MUTATIONS = [
         "    _check_row_wise(fn, chunk, rates, path)\n",
         "",
     ),
+    # The two directions this exemption can fail in, pinned separately.
+    # Reverting the first puts the email shape back as PR #164 merged it, where
+    # `t@example.test` is a finding and every future example address pays an
+    # annotation. A guard people annotate reflexively is a guard nobody reads.
+    (
+        "#167 an address at an RFC 2606 reserved domain is not a finding",
+        "tools/check_no_private_leak.py",
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"' + "\n",
+        "",
+        ("tests/test_leak_guard.py::test_reserved_example_domains_are_not_addresses",),
+    ),
+    # Reverting this drops the tail anchor on the reserved-domain exemption,
+    # so any domain merely *containing* a reserved label passes as unreal.
+    # `e@example.com.co` is then a real mailbox the guard waves through while  # leak-guard: allow (an invented address, named because it is the case this entry pins)
+    # printing `Passed`, which is the failure the guard exists to prevent.
+    (
+        "#167 the reserved-domain exemption binds to the end of the domain",
+        "tools/check_no_private_leak.py",
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"',
+        r'    r"(?!" + _RESERVED_DOMAIN + r")"',
+        ("tests/test_leak_guard.py::test_a_resolvable_address_is_still_caught_in_any_directory",),
+    ),
 ]
 
 

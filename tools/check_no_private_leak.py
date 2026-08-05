@@ -44,6 +44,30 @@ _SCANNED_SUFFIXES = {
 
 _SUPPRESSION = re.compile(r"leak-guard:\s*allow")
 
+# RFC 2606 reserves example.com, example.net, example.org and the top-level
+# domains .test, .example, .invalid and .localhost for documentation and
+# testing, precisely so they can never resolve to anything real; RFC 6761
+# repeats that guarantee for .localhost and .invalid. An address at one of
+# them names nobody and cannot be a mailbox, so it is provably not a leak.
+#
+# This is not the blanket tests/ suppression #154 removed. That one traded
+# real coverage for quiet across three directories. This is a statement about
+# addresses that cannot exist, and it costs no coverage at all: a resolvable
+# domain is still caught everywhere, including under tests/ (issue #167).
+_RESERVED_DOMAIN = (
+    r"(?:[A-Za-z0-9-]+\.)*"
+    r"(?:test|example|invalid|localhost|example\.(?:com|net|org))"
+)
+
+# The reserved tail has to end the domain. `(?![A-Za-z0-9.-])` is what binds
+# it there, so `e@example.com.co` is somebody's real domain and stays caught  # leak-guard: allow (an invented address, named here because it is the case this bound exists to keep catching)
+# rather than passing as a reserved one wearing a suffix.
+_EMAIL = (
+    r"\b[A-Za-z0-9._%+-]+@"
+    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"
+    r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+)
+
 # Shapes that mean real people.
 #
 # These used to be suppressed wholesale under src/, tests/ and examples/, on
@@ -59,7 +83,7 @@ _SUPPRESSION = re.compile(r"leak-guard:\s*allow")
 # genuine literal, and makes writing one down a deliberate act.
 _PERSONAL_PATTERNS = (
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
-    ("email address", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("email address", re.compile(_EMAIL)),
     ("phone number", re.compile(r"\b\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")),
 )
 
