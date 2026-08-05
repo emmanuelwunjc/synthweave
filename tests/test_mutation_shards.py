@@ -316,6 +316,29 @@ def test_every_declared_catcher_names_a_test_that_exists():
     )
 
 
+def test_every_entry_names_a_catcher():
+    """An unpinned entry silently reverts to the pre-#158 behaviour.
+
+    `catchers` has to stay syntactically optional, so an entry can be added and
+    pinned in two steps and so `check()` keeps a defined answer for a
+    four-element tuple. That leaves nothing stopping an entry from shipping
+    unpinned, at which point it is CAUGHT by whatever went red first and its
+    name never has to match what broke. That is exactly the hole #158 was
+    filed to close, and a comment saying "pin your entry" does not close it.
+
+    This is the mechanism rather than the request. It is a list comprehension
+    rather than a harness run, so it costs milliseconds and fails in the
+    `test` job long before the eight-minute `mutation-shard` job starts.
+    """
+    unpinned = [entry[0] for entry in mutation_check.MUTATIONS if not mutation_check.catchers(entry)]
+    assert not unpinned, (
+        "every MUTATIONS entry must name the test that owns its property:\n  "
+        + "\n  ".join(unpinned)
+        + "\nRun `python3 tools/mutation_check.py --audit` to see every test the "
+        "revert breaks, then pin the one that asserts the property."
+    )
+
+
 def test_failing_tests_reads_the_node_ids_out_of_a_short_summary():
     """`--audit` reports which tests a mutation actually broke, so an
     incidental red can be seen rather than inferred."""
