@@ -137,12 +137,15 @@ FAILURE_HEADLINE = {
 # suite that went red somewhere else entirely no longer counts. See `check()`
 # for why a missing node id is STALE rather than a catch.
 #
-# It stays syntactically optional so an entry can be added and pinned in two
-# steps, but every entry here is pinned and a new one should be too. The pins
-# were chosen from a full `--audit` run, which lists every test each revert
-# breaks; the named catcher is the one that asserts the property, not merely
-# one that happened to be red. Add an entry without one and it reverts to the
-# pre-#158 behaviour of trusting the first failure, whatever it was about.
+# It stays syntactically optional here so an entry can be added and pinned in
+# two steps and so `check()` keeps a defined answer for a four-element tuple.
+# It is not optional in practice: `test_every_entry_names_a_catcher` fails the
+# `test` job on an unpinned entry, naming it. That is deliberate. Asking in a
+# comment is what left 109 of 113 entries unpinned after #158 landed.
+#
+# The pins were chosen from a full `--audit` run, which lists every test each
+# revert breaks; the named catcher is the one that asserts the property, not
+# merely one that happened to be red.
 #
 # Two known limitations, both recorded rather than silently lived with:
 #
