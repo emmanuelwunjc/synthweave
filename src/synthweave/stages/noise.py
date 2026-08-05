@@ -229,8 +229,8 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
         reasons = []
         if nan_at.size:
             reasons.append(
-                f"NaN (not a number) for {nan_at.size} row(s), "
-                f"first at row {nan_at[0]} of the chunk"
+                f"NaN (not a number) where a rate in [0, 1] was expected, "
+                f"for {nan_at.size} row(s), first at row {nan_at[0]} of the chunk"
             )
         if out_at.size:
             examples = sorted(set(rates[out_at].tolist()))[:3]

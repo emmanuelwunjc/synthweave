@@ -266,15 +266,19 @@ def test_a_mixed_nan_and_out_of_range_rate_names_both(people):
     above 1 and leave the NaN rows unexplained; naming only NaN would hide a
     rate of 1.5 that corrupts every row it touches.
 
-    The two faults alternate by position rather than by `education`, so every
-    chunk carries both regardless of how the entities happened to be drawn.
+    The rate is a function of `education`, not of the row's position in the
+    chunk. A positional rate would carry both faults in every chunk by
+    construction, but it is also the chunk-derived shape `_check_row_wise`
+    exists to refuse, so the test would only reach this message because the
+    range check happens to run first, and would break for an unrelated reason
+    if that order ever changed.
     """
     schema = _survey_schema(people)
     noiser = sw.Noise(
         {
             "survey": {
                 "amount": [
-                    sw.Missing(lambda f: np.where(np.arange(len(f)) % 2 == 0, np.nan, 1.5))
+                    sw.Missing(lambda f: np.where(f["education"] == "HS", np.nan, 1.5))
                 ]
             }
         }
