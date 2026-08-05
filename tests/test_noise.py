@@ -7,10 +7,24 @@ collide with theirs.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
+import pytest
 
 import synthweave as sw
+
+
+def _survey_schema(people: sw.Entity) -> sw.Schema:
+    """A per-person table carrying `education`, for the rate-function tests."""
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    return sw.Schema(entities=[people], tables=[table], seed=3)
 
 
 def test_a_zero_rate_op_leaves_the_column_dtype_untouched(schema):
@@ -208,3 +222,93 @@ def test_typo_on_a_category_column_falls_back_to_object(people):
 
     assert out["grade"].notna().all()
     assert (out["grade"] != "aa").all()
+
+
+def test_a_nan_rate_is_refused_by_name_not_as_an_empty_example(people):
+    """A rate that is not a number must say so, not claim an out-of-range value.
+
+    The range check and the example list used to disagree: the check asked
+    `(rates >= 0) & (rates <= 1)`, the examples asked `(rates < 0) | (rates > 1)`,
+    and NaN is False against all four. So a NaN rate raised, and then showed
+    `e.g. []`. The caller was told a value was outside [0, 1] and handed no
+    value, so they went looking for a number above 1 that does not exist.
+
+    NaN is the ordinary shape of a rate derived from donor data: a division by
+    a zero-valued column, or arithmetic over a column that itself carries
+    missing values. It stays rejected. Only the message has to be honest.
+    """
+    schema = _survey_schema(people)
+    noiser = sw.Noise(
+        {
+            "survey": {
+                "amount": [
+                    sw.Missing(lambda f: np.where(f["education"] == "HS", np.nan, 0.1))
+                ]
+            }
+        }
+    )
+
+    with pytest.raises(ValueError) as raised:
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
+
+    message = str(raised.value)
+    assert "survey.amount.missing" in message, message
+    assert "e.g. []" not in message, message
+    assert "NaN" in message, message
+    assert re.search(r"\d+ row\(s\)", message), message
+    assert re.search(r"first at row \d+", message), message
+
+
+def test_a_mixed_nan_and_out_of_range_rate_names_both(people):
+    """Two different faults in one chunk, so neither may hide the other.
+
+    Naming only the out-of-range half would send the caller hunting a value
+    above 1 and leave the NaN rows unexplained; naming only NaN would hide a
+    rate of 1.5 that corrupts every row it touches.
+
+    The rate is a function of `education`, not of the row's position in the
+    chunk. A positional rate would carry both faults in every chunk by
+    construction, but it is also the chunk-derived shape `_check_row_wise`
+    exists to refuse, so the test would only reach this message because the
+    range check happens to run first, and would break for an unrelated reason
+    if that order ever changed.
+    """
+    schema = _survey_schema(people)
+    noiser = sw.Noise(
+        {
+            "survey": {
+                "amount": [
+                    sw.Missing(lambda f: np.where(f["education"] == "HS", np.nan, 1.5))
+                ]
+            }
+        }
+    )
+
+    with pytest.raises(ValueError) as raised:
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
+
+    message = str(raised.value)
+    assert "NaN" in message, message
+    assert "outside [0, 1]" in message, message
+    assert "1.5" in message, message
+
+
+def test_a_plainly_out_of_range_rate_keeps_the_message_it_always_had(people):
+    """The NaN fix must not cost the out-of-range case its examples.
+
+    `test_a_row_varying_rate_outside_zero_to_one_fails_loudly` in
+    `test_pipeline.py` matches only the column path, so it would stay green on
+    a message that named nothing. This pins the example itself, and pins that
+    NaN is not blamed for a fault that has nothing to do with it.
+    """
+    schema = _survey_schema(people)
+    noiser = sw.Noise(
+        {"survey": {"amount": [sw.Missing(lambda f: 0.05 + 2.0 * (f["education"] == "HS"))]}}
+    )
+
+    with pytest.raises(ValueError) as raised:
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
+
+    message = str(raised.value)
+    assert "returned value(s) outside [0, 1], e.g. [2.05]" in message, message
+    assert "NaN" not in message, message
