@@ -1464,6 +1464,47 @@ MUTATIONS = [
             "tests/test_pipeline.py::test_a_chunk_derived_rate_of_the_right_length_is_refused",
         ),
     ),
+    # The two directions this exemption can fail in, pinned separately.
+    # Reverting the first puts the email shape back as PR #164 merged it, where
+    # `t@example.test` is a finding and every future example address pays an
+    # annotation. A guard people annotate reflexively is a guard nobody reads.
+    (
+        "#167 an address at an RFC 2606 reserved domain is not a finding",
+        "tools/check_no_private_leak.py",
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"' + "\n",
+        "",
+        ("tests/test_leak_guard.py::test_reserved_example_domains_are_not_addresses",),
+    ),
+    # Reverting this drops the tail anchor on the reserved-domain exemption,
+    # so any domain merely *containing* a reserved label passes as unreal.
+    # `e@example.com.co` is then a real mailbox the guard waves through while  # leak-guard: allow (an invented address, named because it is the case this entry pins)
+    # printing `Passed`, which is the failure the guard exists to prevent.
+    (
+        "#167 the reserved-domain exemption binds to the end of the domain",
+        "tools/check_no_private_leak.py",
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"',
+        r'    r"(?!" + _RESERVED_DOMAIN + r")"',
+        ("tests/test_leak_guard.py::test_a_resolvable_address_is_still_caught_in_any_directory",),
+    ),
+    # The other side of that anchor. Both of these leave the exemption working
+    # everywhere except where example addresses actually get written: the end
+    # of an English sentence, and a capitalised spelling. The guard then still
+    # reads as fixed while a doc author reaches for the escape hatch, which is
+    # the habit #167 exists to end rather than relocate.
+    (
+        "#167 a full stop after a reserved domain is punctuation, not a label",
+        "tools/check_no_private_leak.py",
+        r'r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"',
+        r'r"(?![A-Za-z0-9.-]))"',
+        ("tests/test_leak_guard.py::test_a_reserved_domain_is_reserved_in_prose_and_in_any_case",),
+    ),
+    (
+        "#167 a reserved domain is reserved in any case, as domains are",
+        "tools/check_no_private_leak.py",
+        r'    r"(?i)\b[A-Za-z0-9._%+-]+@"',
+        r'    r"\b[A-Za-z0-9._%+-]+@"',
+        ("tests/test_leak_guard.py::test_a_reserved_domain_is_reserved_in_prose_and_in_any_case",),
+    ),
 ]
 
 
