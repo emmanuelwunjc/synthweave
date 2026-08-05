@@ -242,6 +242,26 @@ def test_reserved_example_domains_are_not_addresses(path, line):
     assert guard.pii_findings(path, line) == []
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A full stop is prose punctuation, not a domain label. Docs are where
+        # example addresses appear most, so flagging this would move the
+        # annotation tax out of tests and into prose rather than removing it.
+        "Write to user@example.com.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "Write to user@example.com, then wait.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "Mail <t@example.test> to configure git.",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        # Domain names are case-insensitive, and the RFCs capitalize them.
+        "CONTACT = 'User@Example.COM'",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+        "CONTACT = 'T@EXAMPLE.TEST'",  # leak-guard: allow (RFC 2606 reserved, and the fixture for that rule)
+    ],
+)
+def test_a_reserved_domain_is_reserved_in_prose_and_in_any_case(line):
+    """The two ways the exemption stops short of its own point. Neither a
+    sentence-ending period nor an uppercase spelling makes a domain real."""
+    assert guard.pii_findings("docs/GUIDE.md", line) == []
+
+
 @pytest.mark.parametrize("path", _ANY_DIRECTORY)
 @pytest.mark.parametrize(
     "line",

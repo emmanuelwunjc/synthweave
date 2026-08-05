@@ -59,12 +59,20 @@ _RESERVED_DOMAIN = (
     r"(?:test|example|invalid|localhost|example\.(?:com|net|org))"
 )
 
-# The reserved tail has to end the domain. `(?![A-Za-z0-9.-])` is what binds
-# it there, so `e@example.com.co` is somebody's real domain and stays caught  # leak-guard: allow (an invented address, named here because it is the case this bound exists to keep catching)
-# rather than passing as a reserved one wearing a suffix.
+# The reserved tail has to end the domain, or `e@example.com.co` -- somebody's  # leak-guard: allow (an invented address, named here because it is the case this bound exists to keep catching)
+# real domain -- would pass as a reserved one wearing a suffix. What ends a
+# domain is the fiddly half: a following label continues it, but a full stop
+# at the end of an English sentence does not. So the tail may not be followed
+# by a domain character, nor by a dot that a label actually follows. Without
+# that second half `Write to user@example.com.` is a finding, and the
+# annotation tax this exemption removes from tests reappears in prose, which
+# is where example addresses mostly live.
+#
+# `(?i)` because domain names are case-insensitive and the RFCs spell them
+# capitalised. `Example.COM` is the same unregistrable domain.
 _EMAIL = (
-    r"\b[A-Za-z0-9._%+-]+@"
-    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"
+    r"(?i)\b[A-Za-z0-9._%+-]+@"
+    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"
     r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 )
 

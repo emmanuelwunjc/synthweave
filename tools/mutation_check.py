@@ -1092,7 +1092,7 @@ MUTATIONS = [
     (
         "#167 an address at an RFC 2606 reserved domain is not a finding",
         "tools/check_no_private_leak.py",
-        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"' + "\n",
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"' + "\n",
         "",
         ("tests/test_leak_guard.py::test_reserved_example_domains_are_not_addresses",),
     ),
@@ -1103,9 +1103,28 @@ MUTATIONS = [
     (
         "#167 the reserved-domain exemption binds to the end of the domain",
         "tools/check_no_private_leak.py",
-        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9.-]))"',
+        r'    r"(?!" + _RESERVED_DOMAIN + r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"',
         r'    r"(?!" + _RESERVED_DOMAIN + r")"',
         ("tests/test_leak_guard.py::test_a_resolvable_address_is_still_caught_in_any_directory",),
+    ),
+    # The other side of that anchor. Both of these leave the exemption working
+    # everywhere except where example addresses actually get written: the end
+    # of an English sentence, and a capitalised spelling. The guard then still
+    # reads as fixed while a doc author reaches for the escape hatch, which is
+    # the habit #167 exists to end rather than relocate.
+    (
+        "#167 a full stop after a reserved domain is punctuation, not a label",
+        "tools/check_no_private_leak.py",
+        r'r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"',
+        r'r"(?![A-Za-z0-9.-]))"',
+        ("tests/test_leak_guard.py::test_a_reserved_domain_is_reserved_in_prose_and_in_any_case",),
+    ),
+    (
+        "#167 a reserved domain is reserved in any case, as domains are",
+        "tools/check_no_private_leak.py",
+        r'    r"(?i)\b[A-Za-z0-9._%+-]+@"',
+        r'    r"\b[A-Za-z0-9._%+-]+@"',
+        ("tests/test_leak_guard.py::test_a_reserved_domain_is_reserved_in_prose_and_in_any_case",),
     ),
 ]
 
