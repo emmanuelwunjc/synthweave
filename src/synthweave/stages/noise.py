@@ -67,7 +67,10 @@ class NoiseOp:
     The function must be a pure function of each row's own values. It is
     handed one chunk at a time, so anything derived from the chunk as a whole
     (its length, a mean, a row's position in it) would make the output depend
-    on `chunk_size`, which is meant to be a memory knob and nothing else. The
+    on `chunk_size`, which is meant to be a memory knob and nothing else.
+    That is not left to the caller: each chunk is also handed to the function
+    split in two, and a rate that moves when the split moves is refused (see
+    `_check_row_wise`). The
     frame it receives is the chunk as the noise stage holds it, which includes
     `_sw_`-prefixed bookkeeping columns; those are internal and must not be
     read.
@@ -174,7 +177,7 @@ class OCR(NoiseOp):
 
 
 def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str) -> np.ndarray:
-    """Per-row rates from a rate function, length- and range-checked.
+    """Per-row rates from a rate function, length-, range- and chunk-checked.
 
     A flat rate is checked in `NoiseOp.__init__`; a function's output only
     exists once it has been called, so the same check has to happen here.
@@ -187,6 +190,13 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
     output depend on `chunk_size`, which is meant to be a memory knob. A
     function is asked for one rate per row; anything else is a config error,
     not a rate. A genuinely flat rate is spelled as a number, not a function.
+
+    Neither check can see a chunk-derived rate that was broadcast back to one
+    value per row (`lambda f: np.full(len(f), f["x"].mean())`): its shape is
+    right, its values are in range, and every row still gets the mean of
+    whichever rows shared its chunk. A shape carries no record of where its
+    values came from, so this last one is checked by behaviour instead, in
+    `_check_row_wise`.
     """
     rates = np.asarray(fn(chunk), dtype=float)
     if rates.shape != (len(chunk),):
@@ -203,7 +213,53 @@ def _row_rates(fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, path: str
             f"noise rate function for {path} returned value(s) outside [0, 1], "
             f"e.g. {sorted(set(bad.tolist()))[:3]}"
         )
+    _check_row_wise(fn, chunk, rates, path)
     return rates
+
+
+def _check_row_wise(
+    fn: Callable[[pd.DataFrame], Any], chunk: pd.DataFrame, rates: np.ndarray, path: str
+) -> None:
+    """Refuse a rate function whose answer moves when the chunking moves.
+
+    The same trick `check_rule` uses on a custom `Rule` (#79), in the shape a
+    rate function takes: present the very same rows split a second way and
+    require every row to keep its rate. A function of the row cannot notice
+    the split; anything reading the chunk as a whole (a mean, a count, a
+    position) answers differently and is caught here rather than in a run
+    whose output quietly depends on `chunk_size`.
+
+    Run on every chunk, not just the first. One chunk is enough only when it
+    happens to be varied; a first chunk whose rows all share the value the
+    rate aggregates (likely with a small `chunk_size` on sorted data) gives
+    both halves the same answer and would let the function through for the
+    rest of the run. The cost is calling the rate function three times per
+    chunk instead of once, which the contract already requires to be a cheap
+    vectorized expression, and it buys the guarantee on the chunks actually
+    processed rather than on one of them.
+
+    A chunk of fewer than two rows cannot be split, so it is skipped.
+    """
+    if len(chunk) < 2:
+        return
+    split = len(chunk) // 2
+    halves = np.concatenate(
+        [
+            np.asarray(fn(chunk.iloc[:split]), dtype=float).reshape(-1),
+            np.asarray(fn(chunk.iloc[split:]), dtype=float).reshape(-1),
+        ]
+    )
+    if halves.shape == rates.shape and np.array_equal(halves, rates):
+        return
+    where = int(np.flatnonzero(halves != rates)[0]) if halves.shape == rates.shape else 0
+    raise ValueError(
+        f"noise rate function for {path} is not a function of the row: the rate a "
+        f"row gets depends on which rows shared its chunk. Splitting the same "
+        f"chunk in two changed row {where}'s rate from {rates[where]} to "
+        f"{halves[where] if where < len(halves) else 'nothing'}, so the output "
+        f"would depend on chunk_size. Compute the rate from the row's own values "
+        f"(f[\"col\"]), not from the chunk as a whole (.mean(), .sum(), len(f))."
+    )
 
 
 def _restore_dtype(values: np.ndarray, dtype: Any) -> np.ndarray | pd.api.extensions.ExtensionArray:

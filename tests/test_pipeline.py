@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -317,6 +318,49 @@ def test_a_row_varying_rate_stays_deterministic_and_chunk_invariant(people):
     # chunk-derived rate being refused.
     with pytest.raises(ValueError, match=r"survey\.amount\.missing must return one rate per row"):
         sw.Pipeline(schema, chunk_size=7, noiser=aggregate).run()
+
+
+def test_a_chunk_derived_rate_of_the_right_length_is_refused(people):
+    """The shape of a rate says nothing about where its value came from.
+
+    The guard above catches an aggregate rate only because a bare
+    `float(...)` is a scalar. Broadcast it back to one value per row and the
+    same aggregate sails through: the shape is `(len(chunk),)`, every row
+    still gets its own entry, and the entry is still the mean of whichever
+    rows happened to share its chunk. So the rate a row receives depends on
+    `chunk_size`, which is exactly the breakage the shape check was added to
+    stop, and exactly the breakage recorded as I3 (chunk size changed the
+    output) invalidating the core scaling claim.
+
+    Inspecting the returned array cannot tell the two apart. Only behaviour
+    can: hand the rate function the same rows split two different ways and
+    see whether a row's rate moved. That is what `sw.check_rule` already does
+    for a chunk-dependent `Rule` (#79), applied here to a rate function.
+
+    Asserted twice on purpose. First that the length guard genuinely passes
+    this function, so the test cannot go green on #101's error message
+    instead; then that the run is refused for chunk dependence by name.
+    """
+    table = sw.Table(
+        "survey",
+        grain=sw.PerEntity("person"),
+        carry=["education"],
+        columns={"amount": sw.Uniform(0, 100)},
+    )
+    schema = sw.Schema(entities=[people], tables=[table], seed=3)
+
+    def chunk_derived(frame):
+        return np.full(len(frame), float((frame["education"] == "HS").mean()))
+
+    sample = pd.DataFrame({"education": ["HS", "College", "HS", "College"]})
+    assert np.asarray(chunk_derived(sample)).shape == (len(sample),), (
+        "the function under test no longer passes the one-rate-per-row check, "
+        "so this test would prove nothing about chunk dependence"
+    )
+
+    noiser = sw.Noise({"survey": {"amount": [sw.Missing(chunk_derived)]}})
+    with pytest.raises(ValueError, match=r"depends on which rows shared its chunk"):
+        sw.Pipeline(schema, chunk_size=7, noiser=noiser).run()
 
 
 def test_a_rate_function_returning_the_wrong_length_fails_loudly(people):
@@ -852,6 +896,107 @@ def test_a_table_that_emits_no_rows_keeps_its_non_empty_dtypes():
     )
 
 
+def _grain_pair(grain, columns, carry=()):
+    """The same table twice, once emitting rows and once not, as a
+    (empty, populated) pair of results. Only `coverage` differs, so any
+    difference in dtypes is caused by the row count and nothing else."""
+    person = sw.Entity(
+        "person",
+        count=6,
+        attributes={
+            "education": sw.Choice(["HS", "College"], [0.6, 0.4]),
+            "wage": sw.Uniform(1.0, 2.0),
+        },
+    )
+    frames = []
+    for coverage in (0.0001, 1.0):
+        table = sw.Table(
+            "t", grain=grain, carry=list(carry), columns=columns, coverage=coverage
+        )
+        schema = sw.Schema(entities=[person], tables=[table], seed=4)
+        frames.append(sw.Pipeline(schema).run()["t"])
+    empty, populated = frames
+    assert len(empty) == 0 and len(populated) > 0
+    return empty, populated
+
+
+def test_an_empty_event_table_keeps_the_occurrence_dtype_of_a_populated_one():
+    """`PerEvent`'s occurrence column is the grain's, not a rule's.
+
+    #82 typed every column whose rule declares a dtype, which left this one
+    `object` empty against `int64` populated: a grain is not a rule and
+    declares nothing. It does not have to. `stages/generate.py::_expand`
+    builds occurrence with `np.arange`, so numpy fixes the type and no config
+    can move it, which makes it knowable at zero rows unlike a `Choice` over
+    strings.
+
+    This test is what stops the two drifting: if the generator ever built
+    occurrence some other way, the populated side would move and this would
+    go red rather than the empty path quietly being wrong.
+    """
+    empty, populated = _grain_pair(
+        sw.PerEvent("person"), {"score": sw.Integer(0, 100)}, carry=["education"]
+    )
+
+    assert empty["occurrence"].dtype == populated["occurrence"].dtype, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
+def test_an_empty_period_table_keeps_the_period_dtype_of_a_populated_one():
+    """The same claim for `PerPeriod`, which needed no change to hold.
+
+    `_expand` builds the period column with `np.asarray(periods, dtype=object)`,
+    so a populated run is `object` whatever the periods are, and an untyped
+    empty column is `object` already. The test exists because that agreement
+    is currently a coincidence of two independent decisions: it is asserted
+    here so a change to either side is caught rather than shipped.
+
+    The periods are integers on purpose. Text periods would put the column
+    back in the family this cannot fix at all, since pandas 3 reads a
+    populated text column as `str` and an empty object one as `object`.
+    """
+    empty, populated = _grain_pair(
+        sw.PerPeriod("person", periods=[2020, 2021]), {"score": sw.Integer(0, 100)}
+    )
+
+    assert empty["period"].dtype == populated["period"].dtype, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
+def test_a_sequential_column_is_the_dtype_a_zero_row_run_provably_cannot_keep():
+    """The one column named in #137 that is left flipping, on purpose.
+
+    `Sequential` computes its values by applying an arbitrary Python callable
+    to another column, so its type is whatever that callable returns for the
+    values it is actually given. There is no declaration to read and nothing
+    to apply the callable to at zero rows, so the empty case has no honest
+    answer: `float64` here comes from `lambda v: v * 2` over floats, and the
+    same rule over an integer column or a callable returning strings would
+    give something else entirely.
+
+    Asserting the flip rather than skipping it means the limit is tested
+    behaviour. If `Sequential` ever gains a way to declare its type, this test
+    goes red and has to be rewritten as an equality, which is exactly the
+    prompt that should happen.
+
+    Scope: this covers `Sequential` only. `wage`, carried from a rule that
+    does declare a type, is asserted equal in the same breath so the test
+    cannot pass by the empty path having broken for everything.
+    """
+    empty, populated = _grain_pair(
+        sw.PerEntity("person"),
+        {"dbl": sw.Sequential(on="wage", fn=lambda v: v * 2)},
+        carry=["wage"],
+    )
+
+    assert empty["wage"].dtype == populated["wage"].dtype
+    assert empty["dbl"].dtype == object and populated["dbl"].dtype != object, (
+        f"empty {empty.dtypes.to_dict()} vs populated {populated.dtypes.to_dict()}"
+    )
+
+
 # --- edge cases that turned out to be sound ---------------------------------
 
 
@@ -986,11 +1131,6 @@ def test_typo_corrupts_non_ascii_values_without_breaking():
     )
 
 
-@pytest.mark.xfail(
-    reason="#81: Typo picks one position uniformly, then finds no keyboard neighbour "
-    "for it, so a value with no Latin characters is never corrupted at all",
-    strict=False,
-)
 def test_typo_corrupts_a_value_with_no_latin_characters():
     """The half of the claim above that `Ünüver` cannot make.
 
@@ -1000,8 +1140,8 @@ def test_typo_corrupts_a_value_with_no_latin_characters():
     is the one that cannot be corrupted by accident.
 
     Written against the behaviour `Typo` claims rather than against today's
-    output, so it turns from xfail to xpass when #81 is fixed. Delete the
-    marker then.
+    output, so it was carried as an `xfail` until #81 was fixed (script-
+    agnostic transposition and duplication). It passes on its own now.
     """
     pairs = _typo_pairs()
     for value in ("北京市", "Ωμέγα"):
